@@ -1,0 +1,34 @@
+[Unit]
+Description=PIA VPN Port Forwarding Service
+After=network.target openvpn-client@pia.service
+Wants=openvpn-client@pia.service
+
+[Service]
+Type=simple
+# Required configuration
+Environment="PIA_CREDENTIALS=/etc/openvpn/client/pia.txt"
+Environment="PIA_CA_CERT=/usr/local/etc/ca.rsa.4096.crt"
+
+# Optional configuration
+#Environment="PIA_DEBUG=true"
+#Environment="PIA_REFRESH_INTERVAL=15m"
+
+# Port change automation
+#Environment="PIA_ON_PORT_CHANGE=/path/to/your/script.sh"
+#Environment="PIA_SCRIPT_TIMEOUT=30s"
+#Environment="PIA_SYNC_SCRIPT=false"
+
+ExecStart=/usr/local/bin/go-pia-port-forwarding /var/run/pia-port.txt
+Restart=on-failure
+RestartSec=30
+
+# Security hardening
+User=nobody
+Group=nogroup
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
