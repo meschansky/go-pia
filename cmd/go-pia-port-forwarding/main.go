@@ -35,14 +35,14 @@ func getScriptMode(cfg *config.Config) string {
 // executePortChangeScript runs the configured script when the port changes
 func executePortChangeScript(cfg *config.Config, port int) {
 	log.Printf("Executing port change script: %s", cfg.OnPortChangeScript)
-	
+
 	// Create a context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.ScriptTimeout)
 	defer cancel()
-	
+
 	// Create the command using the execCommand variable for better testability
 	cmd := execCommand(ctx, cfg.OnPortChangeScript, strconv.Itoa(port), cfg.OutputFile)
-	
+
 	// If running synchronously, capture output
 	if cfg.SyncScript {
 		// Capture output
@@ -53,14 +53,19 @@ func executePortChangeScript(cfg *config.Config, port int) {
 			log.Printf("Script executed successfully\nOutput: %s", string(output))
 		}
 	} else {
-		// For async execution, start the process and don't wait
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		// Run asynchronously with proper process detachment
+		cmd.Stdout = nil
+		cmd.Stderr = nil
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Setpgid: true,
+			Pgid:    0,
+		}
+
 		if err := cmd.Start(); err != nil {
 			log.Printf("Failed to start script: %v", err)
 		} else {
 			log.Printf("Started script asynchronously (pid: %d)", cmd.Process.Pid)
-			
+
 			// Start a goroutine to log when the process completes
 			go func() {
 				err := cmd.Wait()
@@ -73,8 +78,6 @@ func executePortChangeScript(cfg *config.Config, port int) {
 		}
 	}
 }
-
-
 
 func main() {
 	// Parse command line arguments
@@ -112,7 +115,7 @@ func main() {
 	log.Printf("Output file: %s", cfg.OutputFile)
 	log.Printf("OpenVPN config file: %s", cfg.OpenVPNConfigFile)
 	log.Printf("Refresh interval: %s", cfg.RefreshInterval)
-	
+
 	if cfg.OnPortChangeScript != "" {
 		log.Printf("Port change script: %s", cfg.OnPortChangeScript)
 		log.Printf("Script execution mode: %s", getScriptMode(cfg))
@@ -213,7 +216,7 @@ func main() {
 				log.Printf("Failed to write port to file: %v", err)
 			} else {
 				log.Printf("Wrote port %d to file: %s", pfInfo.Port, cfg.OutputFile)
-				
+
 				// Execute port change script if configured
 				if cfg.OnPortChangeScript != "" {
 					executePortChangeScript(cfg, pfInfo.Port)

@@ -16,13 +16,13 @@ Environment="PIA_CA_CERT=/usr/local/etc/ca.rsa.4096.crt"
 # Port change automation
 #Environment="PIA_ON_PORT_CHANGE=/path/to/your/script.sh"
 #Environment="PIA_SCRIPT_TIMEOUT=30s"
-#Environment="PIA_SYNC_SCRIPT=false"
+#Environment="PIA_SYNC_SCRIPT=true"
 
 ExecStart=/usr/local/bin/go-pia-port-forwarding /var/run/pia-port.txt
 Restart=on-failure
 RestartSec=30
 
-# Security hardening
+# Security hardening. It can break scripts that use PIA_ON_PORT_CHANGE
 User=nobody
 Group=nogroup
 ProtectSystem=full
