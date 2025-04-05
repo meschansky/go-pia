@@ -1,0 +1,95 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ['1.24' ]
+        arch: [ 'amd64', 'arm64' ]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ matrix.go-version }}
+
+    - name: Build
+      run: |
+        GOOS=linux GOARCH=${{ matrix.arch }} go build -v -o bin/go-pia-port-forwarding-linux-${{ matrix.arch }} ./cmd/go-pia-port-forwarding
+        GOOS=darwin GOARCH=${{ matrix.arch }} go build -v -o bin/go-pia-port-forwarding-darwin-${{ matrix.arch }} ./cmd/go-pia-port-forwarding
+        # Only build for Windows on amd64
+        if [ "${{ matrix.arch }}" = "amd64" ]; then
+          GOOS=windows GOARCH=${{ matrix.arch }} go build -v -o bin/go-pia-port-forwarding-windows-${{ matrix.arch }}.exe ./cmd/go-pia-port-forwarding
+        fi
+
+    - name: Test
+      run: go test -v ./...
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: go-pia-port-forwarding-${{ matrix.go-version }}-${{ matrix.arch }}
+        path: bin/
+        retention-days: 5
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: artifacts
+
+    - name: Prepare release assets
+      run: |
+        mkdir -p release
+        cp ca.rsa.4096.crt release/
+        cp go-pia-port-forwarding.service release/
+        cp LICENSE release/
+        cp README.md release/
+
+        # Create archives for each platform/architecture
+        for dir in artifacts/*; do
+          platform=$(basename "$dir")
+          mkdir -p "release/$platform"
+          cp -r "$dir"/* "release/$platform/"
+          cp ca.rsa.4096.crt release/$platform/
+          cp go-pia-port-forwarding.service release/$platform/
+          cp LICENSE release/$platform/
+          cp README.md release/$platform/
+
+          cd release
+          tar -czvf "$platform.tar.gz" "$platform"
+          cd ..
+        done
+
+    - name: Create Release
+      id: create_release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          release/*.tar.gz
+          release/ca.rsa.4096.crt
+          release/go-pia-port-forwarding.service
+          release/LICENSE
+          release/README.md
+        draft: false
+        prerelease: false
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
