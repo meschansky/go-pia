@@ -1,6 +1,6 @@
 # Go PIA Port Forwarding
 
-![GitHub Workflow Status](https://img.shields.io/github/workflow/status/meschansky/go-pia/CI?label=build)
+![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/meschansky/go-pia/build.yml?branch=main)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Go Report Card](https://goreportcard.com/badge/github.com/meschansky/go-pia)](https://goreportcard.com/report/github.com/meschansky/go-pia)
 
