@@ -15,12 +15,8 @@ jobs:
     strategy:
       matrix:
         go-version: [ '1.21' ]
-        goos: [ 'linux', 'darwin', 'windows' ]
+        goos: [ 'linux', 'darwin' ]
         goarch: [ 'amd64', 'arm64' ]
-        exclude:
-          # Exclude Windows on ARM64 as it's not commonly used
-          - goos: windows
-            goarch: arm64
 
     steps:
     - uses: actions/checkout@v4
@@ -34,17 +30,17 @@ jobs:
       run: |
         # Create output directory
         mkdir -p bin
-        
+
         # Set binary name based on OS
         if [ "${{ matrix.goos }}" = "windows" ]; then
           BINARY_NAME=go-pia-port-forwarding.exe
         else
           BINARY_NAME=go-pia-port-forwarding
         fi
-        
+
         # Build the binary
         GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -v -o bin/$BINARY_NAME ./cmd/go-pia-port-forwarding
-        
+
         # Create distribution package
         mkdir -p dist/go-pia-${{ matrix.goos }}-${{ matrix.goarch }}
         cp bin/$BINARY_NAME dist/go-pia-${{ matrix.goos }}-${{ matrix.goarch }}/
@@ -54,7 +50,7 @@ jobs:
         cp README.md dist/go-pia-${{ matrix.goos }}-${{ matrix.goarch }}/
         cp AUTOMATION.md dist/go-pia-${{ matrix.goos }}-${{ matrix.goarch }}/
         cp CA_CERTIFICATE.md dist/go-pia-${{ matrix.goos }}-${{ matrix.goarch }}/
-        
+
         # Create archive
         cd dist
         if [ "${{ matrix.goos }}" = "windows" ]; then
@@ -80,10 +76,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    
+
     steps:
     - uses: actions/checkout@v4
-      
+
     - name: Download all artifacts
       uses: actions/download-artifact@v4
       with:
@@ -94,7 +90,7 @@ jobs:
         mkdir -p release
         # Move all artifacts to release directory
         find artifacts -type f -name "*.zip" -o -name "*.tar.gz" | xargs -I{} cp {} release/
-        
+
         # Add additional files
         cp ca.rsa.4096.crt release/
         cp go-pia-port-forwarding.service release/
