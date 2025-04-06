@@ -92,7 +92,7 @@ func main() {
 	// Load configuration
 	cfg := config.DefaultConfig()
 	cfg.OutputFile = outputFile
-	
+
 	// If on-port-change script is specified via command line flag, it takes precedence
 	if *onPortChangeScript != "" {
 		cfg.OnPortChangeScript = *onPortChangeScript
@@ -181,21 +181,37 @@ func main() {
 
 	// Start the port forwarding refresh loop in a goroutine
 	go func() {
+		// Get initial port forwarding info - this will be reused until it expires
+		var pfInfo *portforwarding.PortForwardingInfo
+		var err error
+
+		// Get the initial port forwarding info
+		pfInfo, err = pfClient.GetPortForwarding()
+		if err != nil {
+			log.Printf("Failed to get initial port forwarding info: %v", err)
+			return
+		}
+
+		log.Printf("Obtained port forwarding: port=%d, expires=%s", pfInfo.Port, pfInfo.ExpiresAt)
+
+		// Store the initial port for change detection
+		initialPort := pfInfo.Port
+		portChanged := true // Set to true for initial execution
+
 		for {
-			// Get port forwarding info
-			pfInfo, err := pfClient.GetPortForwarding()
-			if err != nil {
-				log.Printf("Failed to get port forwarding info: %v", err)
-				// Wait for the next tick
-				select {
-				case <-ticker.C:
-					continue
-				case <-sigChan:
-					return
+			// Check if we need to get a new signature (if close to expiration)
+			if time.Until(pfInfo.ExpiresAt) < 24*time.Hour {
+				log.Printf("Port forwarding signature expiring soon, requesting a new one")
+				newPfInfo, err := pfClient.GetPortForwarding()
+				if err != nil {
+					log.Printf("Failed to get new port forwarding info: %v", err)
+				} else {
+					pfInfo = newPfInfo
+					portChanged = pfInfo.Port != initialPort
+					initialPort = pfInfo.Port
+					log.Printf("Obtained new port forwarding: port=%d, expires=%s", pfInfo.Port, pfInfo.ExpiresAt)
 				}
 			}
-
-			log.Printf("Obtained port forwarding: port=%d, expires=%s", pfInfo.Port, pfInfo.ExpiresAt)
 
 			// Bind the port
 			if err := pfClient.BindPort(pfInfo.Payload, pfInfo.Signature); err != nil {
@@ -217,9 +233,11 @@ func main() {
 			} else {
 				log.Printf("Wrote port %d to file: %s", pfInfo.Port, cfg.OutputFile)
 
-				// Execute port change script if configured
-				if cfg.OnPortChangeScript != "" {
+				// Execute port change script if configured, but only if the port has changed
+				if cfg.OnPortChangeScript != "" && portChanged {
+					log.Printf("Port changed, executing script")
 					executePortChangeScript(cfg, pfInfo.Port)
+					portChanged = false // Reset the flag after executing the script
 				}
 			}
 
