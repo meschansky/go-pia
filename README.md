@@ -8,7 +8,8 @@ A robust Go implementation of a port-forwarding service for Private Internet Acc
 
 ## 🚀 Features
 
-- Automatically detects active OpenVPN connections
+- Automatically detects active OpenVPN connections with retry capability
+- Resilient to temporary VPN connection issues
 - Obtains and refreshes PIA authentication tokens
 - Requests and maintains port forwarding
 - Writes the forwarded port to a file for use by other applications
@@ -83,6 +84,7 @@ Where:
 | `PIA_SCRIPT_TIMEOUT` | Timeout for script execution | `30s` |
 | `PIA_SYNC_SCRIPT` | Run script synchronously | `false` |
 | `PIA_CA_CERT` | Path to PIA CA certificate | `./ca.rsa.4096.crt` |
+| `PIA_VPN_RETRY_INTERVAL` | Interval between VPN connection retry attempts | `60s` |
 
 ### Command Line Options
 
@@ -90,7 +92,15 @@ Where:
 Usage: go-pia-port-forwarding [OPTIONS] OUTPUT_FILE
 
 Options:
+  --credentials=PATH     Path to PIA credentials file
+  --ca-cert=PATH         Path to PIA CA certificate
+  --openvpn-config=PATH  Path to OpenVPN config file
   --on-port-change=PATH  Script to execute when port changes
+  --refresh-interval=DUR Port forwarding refresh interval (e.g., 15m)
+  --script-timeout=DUR   Timeout for script execution (e.g., 30s)
+  --vpn-retry-interval=DUR Interval between VPN connection retry attempts (e.g., 60s)
+  --sync-script          Run script synchronously
+  --debug                Enable verbose logging
 ```
 
 ## 🔄 Port Change Automation
@@ -146,14 +156,24 @@ Check the [examples](./examples) directory for sample scripts:
 
 ## 🔍 How It Works
 
-1. The service reads PIA credentials from the specified file
-2. It obtains a PIA authentication token
-3. It detects the active OpenVPN connection and extracts the gateway IP and hostname
-4. It requests a port forwarding signature from the PIA API using the CA certificate
-5. It binds the port to the VPN connection
+1. The service detects an active OpenVPN connection to PIA (with retry capability)
+2. It obtains a PIA authentication token using your credentials
+3. It requests a port forwarding binding from the PIA API
+4. It maintains the port forwarding binding with periodic refreshes
+5. If the connection is lost, it attempts to re-establish port forwarding
 6. It writes the port number to the specified output file
 7. If configured, it executes a script with the port number as an argument
 8. It refreshes the port binding every 15 minutes to keep it active
+
+## 🛡️ Resilience Features
+
+### VPN Connection Retry
+
+The service will automatically retry VPN connection detection if it fails to detect an active OpenVPN connection. This makes it resilient to temporary VPN connection issues and eliminates the need for external monitoring and restart scripts.
+
+- Default retry interval: 60 seconds (configurable)
+- Graceful shutdown on SIGINT/SIGTERM signals
+- Clear logging of retry attempts and connection status
 
 ## 🤝 Contributing
 

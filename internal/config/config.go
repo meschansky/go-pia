@@ -1,6 +1,7 @@
 package config
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,6 +28,8 @@ type Config struct {
 	SyncScript bool
 	// Timeout for script execution (in seconds)
 	ScriptTimeout time.Duration
+	// Retry interval for VPN connection attempts (in seconds)
+	VPNRetryInterval time.Duration
 }
 
 // DefaultConfig returns the default configuration
@@ -47,6 +50,14 @@ func DefaultConfig() *Config {
 		}
 	}
 
+	// Parse VPN retry interval from environment if set
+	vpnRetryInterval := 60 * time.Second
+	if retryStr := os.Getenv("PIA_VPN_RETRY_INTERVAL"); retryStr != "" {
+		if retry, err := time.ParseDuration(retryStr); err == nil {
+			vpnRetryInterval = retry
+		}
+	}
+
 	return &Config{
 		CredentialsFile:    os.Getenv("PIA_CREDENTIALS"),
 		OpenVPNConfigFile:  "/etc/openvpn/client/pia.ovpn",
@@ -56,6 +67,60 @@ func DefaultConfig() *Config {
 		OnPortChangeScript: os.Getenv("PIA_ON_PORT_CHANGE"),
 		SyncScript:         os.Getenv("PIA_SYNC_SCRIPT") == "true",
 		ScriptTimeout:      scriptTimeout,
+		VPNRetryInterval:   vpnRetryInterval,
+	}
+}
+
+// SetupFlags registers command line flags for all configuration options
+func SetupFlags(cfg *Config) {
+	// Define command line flags for all configuration options
+	flag.StringVar(&cfg.CredentialsFile, "credentials", cfg.CredentialsFile, "Path to the file containing PIA credentials (username and password)")
+
+	flag.StringVar(&cfg.OpenVPNConfigFile, "openvpn-config", cfg.OpenVPNConfigFile, "Path to the OpenVPN configuration file")
+
+	flag.StringVar(&cfg.CACertFile, "ca-cert", cfg.CACertFile, "Path to the CA certificate file")
+
+	
+	// Use a string variable for duration flags, will be parsed after flag.Parse()
+	refreshIntervalStr := flag.String("refresh-interval", "", "Refresh interval for port forwarding (e.g., 15m, 900s)")
+
+	scriptTimeoutStr := flag.String("script-timeout", "", "Timeout for script execution (e.g., 30s, 1m)")
+
+	vpnRetryIntervalStr := flag.String("vpn-retry-interval", "", "Retry interval for VPN connection attempts (e.g., 60s, 1m)")
+
+	
+	flag.BoolVar(&cfg.Debug, "debug", cfg.Debug, "Enable debug logging")
+
+	flag.StringVar(&cfg.OnPortChangeScript, "on-port-change", cfg.OnPortChangeScript, "Script to execute when port changes")
+
+	flag.BoolVar(&cfg.SyncScript, "sync-script", cfg.SyncScript, "Whether to run the script synchronously (wait for completion)")
+
+	
+	// Parse the flags
+	flag.Parse()
+	
+	// Get the output file from the first non-flag argument
+	if flag.NArg() > 0 {
+		cfg.OutputFile = flag.Arg(0)
+	}
+	
+	// Parse duration flags if provided
+	if *refreshIntervalStr != "" {
+		if d, err := time.ParseDuration(*refreshIntervalStr); err == nil {
+			cfg.RefreshInterval = d
+		}
+	}
+	
+	if *scriptTimeoutStr != "" {
+		if d, err := time.ParseDuration(*scriptTimeoutStr); err == nil {
+			cfg.ScriptTimeout = d
+		}
+	}
+	
+	if *vpnRetryIntervalStr != "" {
+		if d, err := time.ParseDuration(*vpnRetryIntervalStr); err == nil {
+			cfg.VPNRetryInterval = d
+		}
 	}
 }
 

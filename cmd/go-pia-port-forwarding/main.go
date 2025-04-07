@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -20,9 +20,6 @@ import (
 
 // Mock the exec.CommandContext function for testing
 var execCommand = exec.CommandContext
-
-// Define command line flags
-var onPortChangeScript = flag.String("on-port-change", "", "Script to execute when port changes")
 
 // getScriptMode returns a string describing the script execution mode
 func getScriptMode(cfg *config.Config) string {
@@ -79,24 +76,35 @@ func executePortChangeScript(cfg *config.Config, port int) {
 	}
 }
 
+// detectVPNWithRetry attempts to detect an OpenVPN connection with retries
+func detectVPNWithRetry(ctx context.Context, cfg *config.Config) (*vpn.ConnectionInfo, error) {
+	var lastErr error
+	for {
+		// Try to detect the VPN connection
+		connInfo, err := vpn.DetectOpenVPNConnection(cfg.OpenVPNConfigFile)
+		if err == nil {
+			return connInfo, nil
+		}
+
+		lastErr = err
+		log.Printf("Failed to detect OpenVPN connection: %v. Retrying in %s...", err, cfg.VPNRetryInterval)
+
+		// Wait for the retry interval or until context is canceled
+		select {
+		case <-time.After(cfg.VPNRetryInterval):
+			// Continue with the next attempt
+		case <-ctx.Done():
+			return nil, fmt.Errorf("VPN detection canceled: %w", lastErr)
+		}
+	}
+}
+
 func main() {
-	// Parse command line arguments
-	flag.Parse()
-
-	// Get the output file path from the first argument
-	var outputFile string
-	if flag.NArg() > 0 {
-		outputFile = flag.Arg(0)
-	}
-
-	// Load configuration
+	// Create a default configuration
 	cfg := config.DefaultConfig()
-	cfg.OutputFile = outputFile
 
-	// If on-port-change script is specified via command line flag, it takes precedence
-	if *onPortChangeScript != "" {
-		cfg.OnPortChangeScript = *onPortChangeScript
-	}
+	// Setup and parse command line flags
+	config.SetupFlags(cfg)
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
@@ -139,13 +147,38 @@ func main() {
 	}
 	log.Printf("Successfully obtained PIA token")
 
-	// Detect OpenVPN connection
+	// Set up signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Detect OpenVPN connection with retry logic
 	log.Printf("Detecting OpenVPN connection...")
-	connInfo, err := vpn.DetectOpenVPNConnection(cfg.OpenVPNConfigFile)
+
+	// Create a context that can be canceled on SIGINT/SIGTERM
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	defer cancelCtx()
+
+	// Setup a goroutine to handle signals and cancel the context
+	go func() {
+		<-sigChan
+		log.Println("Received termination signal, stopping VPN detection...")
+		cancelCtx()
+		// Re-send the signal to ensure clean termination after context is canceled
+		signal.Reset(syscall.SIGINT, syscall.SIGTERM)
+		p, _ := os.FindProcess(os.Getpid())
+		p.Signal(syscall.SIGTERM)
+	}()
+
+	// Try to detect the VPN connection, with retries
+	connInfo, err := detectVPNWithRetry(ctx, cfg)
 	if err != nil {
-		log.Fatalf("Failed to detect OpenVPN connection: %v", err)
+		log.Fatalf("Failed to detect OpenVPN connection after retries: %v", err)
 	}
 	log.Printf("Detected OpenVPN connection: gateway=%s, hostname=%s", connInfo.GatewayIP, connInfo.Hostname)
+
+	// Reset the signal handler for the main loop
+	signal.Reset(syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	// Resolve CA certificate path
 	caCertPath := cfg.CACertFile
@@ -167,10 +200,6 @@ func main() {
 
 	// Create port forwarding client
 	pfClient := portforwarding.NewClient(token, connInfo.GatewayIP, connInfo.Hostname, caCertPath)
-
-	// Set up signal handling for graceful shutdown
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	// Create a ticker for refreshing the port forwarding
 	ticker := time.NewTicker(cfg.RefreshInterval)

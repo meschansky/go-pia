@@ -2,6 +2,7 @@
 Description=PIA VPN Port Forwarding Service
 After=network.target openvpn-client@pia.service
 Wants=openvpn-client@pia.service
+# BindsTo=openvpn-client@pia.service # Will stop the service if the VPN connection is lost
 
 [Service]
 Type=simple
@@ -10,6 +11,7 @@ Environment="PIA_CREDENTIALS=/etc/openvpn/client/pia.txt"
 Environment="PIA_CA_CERT=/usr/local/etc/ca.rsa.4096.crt"
 
 # Optional configuration
+#Environment="PIA_VPN_RETRY_INTERVAL=60s" # How often to check for active VPN connection
 #Environment="PIA_DEBUG=true"
 #Environment="PIA_REFRESH_INTERVAL=15m"
 
@@ -22,7 +24,8 @@ ExecStart=/usr/local/bin/go-pia-port-forwarding /var/run/pia-port.txt
 Restart=on-failure
 RestartSec=30
 
-# Security hardening. It can break scripts that use PIA_ON_PORT_CHANGE
+# Security hardening. It can break scripts that use PIA_ON_PORT_CHANGE as it will be run with
+# a different user that may not have the same permissions to access the output file
 User=nobody
 Group=nogroup
 ProtectSystem=full

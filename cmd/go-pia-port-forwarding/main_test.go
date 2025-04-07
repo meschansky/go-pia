@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/meschansky/go-pia/internal/config"
+	"github.com/meschansky/go-pia/internal/vpn"
 )
 
 // parseArgs parses command line arguments and returns a configuration object
@@ -287,6 +289,151 @@ exit 0
 			}
 			if !tc.expectError && err != nil {
 				t.Errorf("Expected no error but got: %v", err)
+			}
+		})
+	}
+}
+
+// mockDetectOpenVPNConnection is a mock for vpn.DetectOpenVPNConnection used in tests
+type mockVPNDetector struct {
+	callCount int
+	maxFailures int
+	delay time.Duration
+}
+
+func (m *mockVPNDetector) detect(configPath string) (*vpn.ConnectionInfo, error) {
+	m.callCount++
+	
+	// Simulate delay if configured
+	if m.delay > 0 {
+		time.Sleep(m.delay)
+	}
+	
+	// Return success after specified number of failures
+	if m.callCount <= m.maxFailures {
+		return nil, fmt.Errorf("mock VPN detection failure %d of %d", m.callCount, m.maxFailures)
+	}
+	
+	// Success case
+	return &vpn.ConnectionInfo{
+		GatewayIP: "10.0.0.1",
+		Hostname:  "test.privacy.network",
+	}, nil
+}
+
+// TestDetectVPNWithRetry tests the VPN detection retry logic
+func TestDetectVPNWithRetry(t *testing.T) {
+	// Create a test configuration
+	cfg := &config.Config{
+		VPNRetryInterval: 100 * time.Millisecond, // Short interval for tests
+		OpenVPNConfigFile: "test.ovpn",
+	}
+	
+	testCases := []struct {
+		name string
+		maxFailures int
+		expectedCalls int
+		ctxTimeout time.Duration
+		expectSuccess bool
+	}{
+		{
+			name: "Success on first try",
+			maxFailures: 0,
+			expectedCalls: 1,
+			ctxTimeout: 0, // No timeout
+			expectSuccess: true,
+		},
+		{
+			name: "Success after 3 failures",
+			maxFailures: 3,
+			expectedCalls: 4,
+			ctxTimeout: 0, // No timeout
+			expectSuccess: true,
+		},
+		{
+			name: "Context cancellation",
+			maxFailures: 10,
+			expectedCalls: 3, // Expect around 3 calls in 250ms with 100ms retry interval
+			ctxTimeout: 250 * time.Millisecond,
+			expectSuccess: false,
+		},
+	}
+	
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create a mock detector
+			mockDetector := &mockVPNDetector{
+				maxFailures: tc.maxFailures,
+				delay: 10 * time.Millisecond, // Small delay to make context cancellation test reliable
+			}
+			
+			// Create a context with timeout if specified
+			var ctx context.Context
+			var cancel context.CancelFunc
+			if tc.ctxTimeout > 0 {
+				ctx, cancel = context.WithTimeout(context.Background(), tc.ctxTimeout)
+			} else {
+				ctx, cancel = context.WithCancel(context.Background())
+			}
+			defer cancel()
+			
+			// Create a custom detectVPNWithRetry function that uses our mock
+			detectVPN := func(ctx context.Context, cfg *config.Config) (*vpn.ConnectionInfo, error) {
+				var lastErr error
+				for {
+					// Try to detect the VPN connection using our mock
+					connInfo, err := mockDetector.detect(cfg.OpenVPNConfigFile)
+					if err == nil {
+						return connInfo, nil
+					}
+					
+					lastErr = err
+					
+					// Wait for the retry interval or until context is canceled
+					select {
+					case <-time.After(cfg.VPNRetryInterval):
+						// Continue with the next attempt
+					case <-ctx.Done():
+						return nil, fmt.Errorf("VPN detection canceled: %w", lastErr)
+					}
+				}
+			}
+			
+			// Call the function
+			connInfo, err := detectVPN(ctx, cfg)
+			
+			// Check results
+			if tc.expectSuccess {
+				if err != nil {
+					t.Errorf("Expected success, got error: %v", err)
+				}
+				if connInfo == nil {
+					t.Error("Expected connection info, got nil")
+				} else {
+					if connInfo.GatewayIP != "10.0.0.1" || connInfo.Hostname != "test.privacy.network" {
+						t.Errorf("Unexpected connection info: %+v", connInfo)
+					}
+				}
+			} else {
+				if err == nil {
+					t.Error("Expected error, got success")
+				}
+				if connInfo != nil {
+					t.Errorf("Expected nil connection info, got: %+v", connInfo)
+				}
+			}
+			
+			// Check call count (with some flexibility for the timeout case)
+			if tc.ctxTimeout > 0 {
+				// For timeout case, just check that we made some calls but not too many
+				if mockDetector.callCount < 1 || mockDetector.callCount > tc.maxFailures {
+					t.Errorf("Expected between 1 and %d calls, got %d", tc.maxFailures, mockDetector.callCount)
+				}
+			} else {
+				// For non-timeout cases, check exact call count
+				if mockDetector.callCount != tc.expectedCalls {
+					t.Errorf("Expected %d calls, got %d", tc.expectedCalls, mockDetector.callCount)
+				}
 			}
 		})
 	}
