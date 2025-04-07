@@ -143,13 +143,13 @@ func mockExecutePortChangeScript(cfg *config.Config, port int) error {
 	if cfg.OnPortChangeScript == "" {
 		return errors.New("no script specified")
 	}
-	
+
 	// Check if script exists and is executable
-	if cfg.OnPortChangeScript != "/test/valid-script.sh" && 
-	   cfg.OnPortChangeScript != "/test/mock-script.sh" {
+	if cfg.OnPortChangeScript != "/test/valid-script.sh" &&
+		cfg.OnPortChangeScript != "/test/mock-script.sh" {
 		return errors.New("script not found or not executable")
 	}
-	
+
 	return nil
 }
 
@@ -183,7 +183,7 @@ func TestGetScriptMode(t *testing.T) {
 			expected: "asynchronous",
 		},
 	}
-	
+
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			result := testGetScriptMode(tc.cfg)
@@ -200,10 +200,10 @@ func testExecuteScript(cfg *config.Config, port int) error {
 	if _, err := os.Stat(cfg.OnPortChangeScript); os.IsNotExist(err) {
 		return err
 	}
-	
+
 	// Create a command to execute the script
 	cmd := exec.Command(cfg.OnPortChangeScript, strconv.Itoa(port), cfg.OutputFile)
-	
+
 	// If running synchronously, capture output
 	if cfg.SyncScript {
 		output, err := cmd.CombinedOutput()
@@ -216,7 +216,7 @@ func testExecuteScript(cfg *config.Config, port int) error {
 			return fmt.Errorf("failed to start script: %v", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -225,7 +225,7 @@ func TestScriptExecution(t *testing.T) {
 	// Create a temporary test script
 	tmpDir := t.TempDir()
 	testScriptPath := filepath.Join(tmpDir, "test-script.sh")
-	
+
 	// Write a simple test script that outputs the arguments
 	testScriptContent := `#!/bin/sh
 echo "Port: $1"
@@ -235,7 +235,7 @@ exit 0
 	if err := os.WriteFile(testScriptPath, []byte(testScriptContent), 0755); err != nil {
 		t.Fatalf("Failed to create test script: %v", err)
 	}
-	
+
 	// Test cases
 	testCases := []struct {
 		name        string
@@ -277,12 +277,12 @@ exit 0
 			expectError: true,
 		},
 	}
-	
+
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Execute the script
 			err := testExecuteScript(tc.cfg, tc.port)
-			
+
 			// Check if error matches expectation
 			if tc.expectError && err == nil {
 				t.Errorf("Expected error but got nil")
@@ -296,24 +296,24 @@ exit 0
 
 // mockDetectOpenVPNConnection is a mock for vpn.DetectOpenVPNConnection used in tests
 type mockVPNDetector struct {
-	callCount int
+	callCount   int
 	maxFailures int
-	delay time.Duration
+	delay       time.Duration
 }
 
 func (m *mockVPNDetector) detect(configPath string) (*vpn.ConnectionInfo, error) {
 	m.callCount++
-	
+
 	// Simulate delay if configured
 	if m.delay > 0 {
 		time.Sleep(m.delay)
 	}
-	
+
 	// Return success after specified number of failures
 	if m.callCount <= m.maxFailures {
 		return nil, fmt.Errorf("mock VPN detection failure %d of %d", m.callCount, m.maxFailures)
 	}
-	
+
 	// Success case
 	return &vpn.ConnectionInfo{
 		GatewayIP: "10.0.0.1",
@@ -325,48 +325,48 @@ func (m *mockVPNDetector) detect(configPath string) (*vpn.ConnectionInfo, error)
 func TestDetectVPNWithRetry(t *testing.T) {
 	// Create a test configuration
 	cfg := &config.Config{
-		VPNRetryInterval: 100 * time.Millisecond, // Short interval for tests
+		VPNRetryInterval:  100 * time.Millisecond, // Short interval for tests
 		OpenVPNConfigFile: "test.ovpn",
 	}
-	
+
 	testCases := []struct {
-		name string
-		maxFailures int
+		name          string
+		maxFailures   int
 		expectedCalls int
-		ctxTimeout time.Duration
+		ctxTimeout    time.Duration
 		expectSuccess bool
 	}{
 		{
-			name: "Success on first try",
-			maxFailures: 0,
+			name:          "Success on first try",
+			maxFailures:   0,
 			expectedCalls: 1,
-			ctxTimeout: 0, // No timeout
+			ctxTimeout:    0, // No timeout
 			expectSuccess: true,
 		},
 		{
-			name: "Success after 3 failures",
-			maxFailures: 3,
+			name:          "Success after 3 failures",
+			maxFailures:   3,
 			expectedCalls: 4,
-			ctxTimeout: 0, // No timeout
+			ctxTimeout:    0, // No timeout
 			expectSuccess: true,
 		},
 		{
-			name: "Context cancellation",
-			maxFailures: 10,
+			name:          "Context cancellation",
+			maxFailures:   10,
 			expectedCalls: 3, // Expect around 3 calls in 250ms with 100ms retry interval
-			ctxTimeout: 250 * time.Millisecond,
+			ctxTimeout:    250 * time.Millisecond,
 			expectSuccess: false,
 		},
 	}
-	
+
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Create a mock detector
 			mockDetector := &mockVPNDetector{
 				maxFailures: tc.maxFailures,
-				delay: 10 * time.Millisecond, // Small delay to make context cancellation test reliable
+				delay:       10 * time.Millisecond, // Small delay to make context cancellation test reliable
 			}
-			
+
 			// Create a context with timeout if specified
 			var ctx context.Context
 			var cancel context.CancelFunc
@@ -376,7 +376,7 @@ func TestDetectVPNWithRetry(t *testing.T) {
 				ctx, cancel = context.WithCancel(context.Background())
 			}
 			defer cancel()
-			
+
 			// Create a custom detectVPNWithRetry function that uses our mock
 			detectVPN := func(ctx context.Context, cfg *config.Config) (*vpn.ConnectionInfo, error) {
 				var lastErr error
@@ -386,9 +386,9 @@ func TestDetectVPNWithRetry(t *testing.T) {
 					if err == nil {
 						return connInfo, nil
 					}
-					
+
 					lastErr = err
-					
+
 					// Wait for the retry interval or until context is canceled
 					select {
 					case <-time.After(cfg.VPNRetryInterval):
@@ -398,10 +398,10 @@ func TestDetectVPNWithRetry(t *testing.T) {
 					}
 				}
 			}
-			
+
 			// Call the function
 			connInfo, err := detectVPN(ctx, cfg)
-			
+
 			// Check results
 			if tc.expectSuccess {
 				if err != nil {
@@ -422,7 +422,7 @@ func TestDetectVPNWithRetry(t *testing.T) {
 					t.Errorf("Expected nil connection info, got: %+v", connInfo)
 				}
 			}
-			
+
 			// Check call count (with some flexibility for the timeout case)
 			if tc.ctxTimeout > 0 {
 				// For timeout case, just check that we made some calls but not too many
@@ -467,84 +467,84 @@ func TestSetupConfig(t *testing.T) {
 
 	// Test cases
 	testCases := []struct {
-		name                string
-		envCredentials      string
-		envDebug            string
-		envRefreshInt       string
-		envOnPortChange     string
-		envScriptTimeout    string
-		envSyncScript       string
-		outputFile          string
-		expectError         bool
-		expectedDebug       bool
-		expectedRefresh     time.Duration
-		expectedScript      string
-		expectedTimeout     time.Duration
-		expectedSyncScript  bool
+		name               string
+		envCredentials     string
+		envDebug           string
+		envRefreshInt      string
+		envOnPortChange    string
+		envScriptTimeout   string
+		envSyncScript      string
+		outputFile         string
+		expectError        bool
+		expectedDebug      bool
+		expectedRefresh    time.Duration
+		expectedScript     string
+		expectedTimeout    time.Duration
+		expectedSyncScript bool
 	}{
 		{
-			name:                "Valid config",
-			envCredentials:      credFile,
-			envDebug:            "true",
-			envRefreshInt:       "300",
-			envOnPortChange:     "/test/script.sh",
-			envScriptTimeout:    "60",
-			envSyncScript:       "true",
-			outputFile:          filepath.Join(tmpDir, "port.txt"),
-			expectError:         false,
-			expectedDebug:       true,
-			expectedRefresh:     300 * time.Second,
-			expectedScript:      "/test/script.sh",
-			expectedTimeout:     60 * time.Second,
-			expectedSyncScript:  true,
+			name:               "Valid config",
+			envCredentials:     credFile,
+			envDebug:           "true",
+			envRefreshInt:      "300",
+			envOnPortChange:    "/test/script.sh",
+			envScriptTimeout:   "60",
+			envSyncScript:      "true",
+			outputFile:         filepath.Join(tmpDir, "port.txt"),
+			expectError:        false,
+			expectedDebug:      true,
+			expectedRefresh:    300 * time.Second,
+			expectedScript:     "/test/script.sh",
+			expectedTimeout:    60 * time.Second,
+			expectedSyncScript: true,
 		},
 		{
-			name:                "Missing credentials",
-			envCredentials:      "",
-			envDebug:            "false",
-			envRefreshInt:       "",
-			envOnPortChange:     "",
-			envScriptTimeout:    "",
-			envSyncScript:       "",
-			outputFile:          filepath.Join(tmpDir, "port.txt"),
-			expectError:         true,
-			expectedDebug:       false,
-			expectedRefresh:     15 * time.Minute,
-			expectedScript:      "",
-			expectedTimeout:     30 * time.Second,
-			expectedSyncScript:  false,
+			name:               "Missing credentials",
+			envCredentials:     "",
+			envDebug:           "false",
+			envRefreshInt:      "",
+			envOnPortChange:    "",
+			envScriptTimeout:   "",
+			envSyncScript:      "",
+			outputFile:         filepath.Join(tmpDir, "port.txt"),
+			expectError:        true,
+			expectedDebug:      false,
+			expectedRefresh:    15 * time.Minute,
+			expectedScript:     "",
+			expectedTimeout:    30 * time.Second,
+			expectedSyncScript: false,
 		},
 		{
-			name:                "Invalid refresh interval",
-			envCredentials:      credFile,
-			envDebug:            "false",
-			envRefreshInt:       "invalid",
-			envOnPortChange:     "",
-			envScriptTimeout:    "",
-			envSyncScript:       "",
-			outputFile:          filepath.Join(tmpDir, "port.txt"),
-			expectError:         true,
-			expectedDebug:       false,
-			expectedRefresh:     15 * time.Minute,
-			expectedScript:      "",
-			expectedTimeout:     30 * time.Second,
-			expectedSyncScript:  false,
+			name:               "Invalid refresh interval",
+			envCredentials:     credFile,
+			envDebug:           "false",
+			envRefreshInt:      "invalid",
+			envOnPortChange:    "",
+			envScriptTimeout:   "",
+			envSyncScript:      "",
+			outputFile:         filepath.Join(tmpDir, "port.txt"),
+			expectError:        true,
+			expectedDebug:      false,
+			expectedRefresh:    15 * time.Minute,
+			expectedScript:     "",
+			expectedTimeout:    30 * time.Second,
+			expectedSyncScript: false,
 		},
 		{
-			name:                "Invalid script timeout",
-			envCredentials:      credFile,
-			envDebug:            "false",
-			envRefreshInt:       "300",
-			envOnPortChange:     "/test/script.sh",
-			envScriptTimeout:    "invalid",
-			envSyncScript:       "false",
-			outputFile:          filepath.Join(tmpDir, "port.txt"),
-			expectError:         true,
-			expectedDebug:       false,
-			expectedRefresh:     300 * time.Second,
-			expectedScript:      "/test/script.sh",
-			expectedTimeout:     30 * time.Second,
-			expectedSyncScript:  false,
+			name:               "Invalid script timeout",
+			envCredentials:     credFile,
+			envDebug:           "false",
+			envRefreshInt:      "300",
+			envOnPortChange:    "/test/script.sh",
+			envScriptTimeout:   "invalid",
+			envSyncScript:      "false",
+			outputFile:         filepath.Join(tmpDir, "port.txt"),
+			expectError:        true,
+			expectedDebug:      false,
+			expectedRefresh:    300 * time.Second,
+			expectedScript:     "/test/script.sh",
+			expectedTimeout:    30 * time.Second,
+			expectedSyncScript: false,
 		},
 	}
 

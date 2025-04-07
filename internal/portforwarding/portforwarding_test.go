@@ -11,12 +11,12 @@ import (
 
 // mockClient is a test implementation of the Client
 type mockClient struct {
-	token     string
-	gateway   string
-	hostname  string
-	caCert    string
-	server    *httptest.Server
-	port      int
+	token      string
+	gateway    string
+	hostname   string
+	caCert     string
+	server     *httptest.Server
+	port       int
 	expiration time.Time
 }
 
