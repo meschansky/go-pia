@@ -15,8 +15,8 @@ jobs:
     strategy:
       matrix:
         go-version: [ '1.21' ]
-        goos: [ 'linux', 'darwin' ]
-        goarch: [ 'amd64', 'arm64' ]
+        goos: [ 'linux' ]
+        goarch: [ 'amd64', 'arm64', 'arm' ]
 
     steps:
     - uses: actions/checkout@v4
@@ -80,7 +80,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-      
+
       - name: List artifacts
         run: find artifacts -type f | sort
 
