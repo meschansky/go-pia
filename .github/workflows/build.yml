@@ -70,19 +70,61 @@ jobs:
         path: dist/go-pia-${{ matrix.goos }}-${{ matrix.goarch }}.*
         retention-days: 30
 
-  # Upload binaries for commits to main branch
-  upload-main-binaries:
+  # Create releases for commits to main branch
+  main-branch-release:
     needs: build
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: List artifacts
-        run: find artifacts -type f | sort
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          # Move all artifacts to release directory
+          find artifacts -type f -name "*.zip" -o -name "*.tar.gz" | xargs -I{} cp {} release/
+
+          # Add additional files
+          cp ca.rsa.4096.crt release/
+          cp go-pia-port-forwarding.service release/
+          cp LICENSE release/
+          cp README.md release/
+          cp CA_CERTIFICATE.md release/
+
+      - name: Generate release name
+        id: release_name
+        run: |
+          # Get short commit hash
+          SHORT_HASH=$(git rev-parse --short HEAD)
+          # Get current date in YYYY-MM-DD format
+          DATE=$(date +"%Y-%m-%d")
+          # Set release name
+          echo "name=main-${DATE}-${SHORT_HASH}" >> $GITHUB_OUTPUT
+          echo "title=Development build ${DATE} (${SHORT_HASH})" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: ${{ steps.release_name.outputs.title }}
+          tag_name: ${{ steps.release_name.outputs.name }}
+          files: |
+            release/*.tar.gz
+            release/ca.rsa.4096.crt
+            release/go-pia-port-forwarding.service
+            release/LICENSE
+            release/README.md
+          draft: false
+          prerelease: true
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # Create GitHub release for tagged versions
   release:
@@ -111,7 +153,6 @@ jobs:
         cp go-pia-port-forwarding.service release/
         cp LICENSE release/
         cp README.md release/
-        cp AUTOMATION.md release/
         cp CA_CERTIFICATE.md release/
 
     - name: Create Release
