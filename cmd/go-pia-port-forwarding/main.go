@@ -99,6 +99,177 @@ func detectVPNWithRetry(ctx context.Context, cfg *config.Config) (*vpn.Connectio
 	}
 }
 
+// setupLogging configures the logging based on debug mode
+func setupLogging(debug bool) {
+	if debug {
+		log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
+	} else {
+		log.SetFlags(log.Ldate | log.Ltime)
+	}
+}
+
+// logConfigInfo logs the configuration information
+func logConfigInfo(cfg *config.Config) {
+	log.Printf("Starting PIA port forwarding service")
+	log.Printf("Credentials file: %s", cfg.CredentialsFile)
+	log.Printf("Output file: %s", cfg.OutputFile)
+	log.Printf("OpenVPN config file: %s", cfg.OpenVPNConfigFile)
+	log.Printf("Refresh interval: %s", cfg.RefreshInterval)
+	log.Printf("VPN retry interval: %s", cfg.VPNRetryInterval)
+
+	if cfg.OnPortChangeScript != "" {
+		log.Printf("Port change script: %s", cfg.OnPortChangeScript)
+		log.Printf("Script execution mode: %s", getScriptMode(cfg))
+		log.Printf("Script timeout: %s", cfg.ScriptTimeout)
+	}
+}
+
+// getAuthToken obtains a PIA authentication token
+func getAuthToken(cfg *config.Config) (string, error) {
+	// Load credentials
+	username, password, err := cfg.LoadCredentials()
+	if err != nil {
+		return "", fmt.Errorf("failed to load credentials: %w", err)
+	}
+
+	// Create authentication client
+	authClient := auth.NewClient(username, password)
+
+	// Get token
+	log.Printf("Obtaining PIA authentication token...")
+	token, err := authClient.GetToken()
+	if err != nil {
+		return "", fmt.Errorf("failed to get token: %w", err)
+	}
+	log.Printf("Successfully obtained PIA token")
+
+	return token, nil
+}
+
+// setupSignalHandler sets up a channel for OS signals
+func setupSignalHandler() chan os.Signal {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	return sigChan
+}
+
+// resolveCACertPath resolves the CA certificate path
+func resolveCACertPath(certPath string) (string, error) {
+	if filepath.IsAbs(certPath) {
+		return certPath, nil
+	}
+
+	// If it's not an absolute path, look for it in the current directory
+	localPath := filepath.Join(".", certPath)
+
+	// Check if the file exists
+	if _, err := os.Stat(localPath); err == nil {
+		return localPath, nil
+	}
+
+	// If not, try to find it in the same directory as the examples
+	examplesPath := filepath.Join("/etc/openvpn/client", certPath)
+	if _, err := os.Stat(examplesPath); err == nil {
+		return examplesPath, nil
+	}
+
+	return "", fmt.Errorf("CA certificate file not found: %s", certPath)
+}
+
+// runPortForwardingLoop handles the port forwarding refresh loop
+func runPortForwardingLoop(pfClient *portforwarding.Client, cfg *config.Config, sigChan chan os.Signal, refreshed chan struct{}) {
+	// Create a ticker for refreshing the port forwarding
+	ticker := time.NewTicker(cfg.RefreshInterval)
+	defer ticker.Stop()
+
+	// Get initial port forwarding info - this will be reused until it expires
+	var pfInfo *portforwarding.PortForwardingInfo
+	var err error
+
+	// Get the initial port forwarding info
+	pfInfo, err = pfClient.GetPortForwarding()
+	if err != nil {
+		log.Printf("Failed to get initial port forwarding info: %v", err)
+		return
+	}
+
+	log.Printf("Obtained port forwarding: port=%d, expires=%s", pfInfo.Port, pfInfo.ExpiresAt)
+
+	// Store the initial port for change detection
+	initialPort := pfInfo.Port
+	portChanged := true // Set to true for initial execution
+
+	for {
+		// Check if we need to get a new signature (if close to expiration)
+		if time.Until(pfInfo.ExpiresAt) < 24*time.Hour {
+			pfInfo = refreshPortForwarding(pfClient, pfInfo, &initialPort, &portChanged)
+		}
+
+		// Bind the port
+		if err := pfClient.BindPort(pfInfo.Payload, pfInfo.Signature); err != nil {
+			log.Printf("Failed to bind port: %v", err)
+			// Wait for the next tick
+			select {
+			case <-ticker.C:
+				continue
+			case <-sigChan:
+				return
+			}
+		}
+
+		log.Printf("Successfully bound port %d", pfInfo.Port)
+
+		// Handle port file writing and script execution
+		handlePortOutput(pfInfo.Port, cfg, portChanged)
+		portChanged = false // Reset the flag after executing the script
+
+		// Signal that the port forwarding has been refreshed
+		select {
+		case refreshed <- struct{}{}:
+		default:
+		}
+
+		// Wait for the next tick
+		select {
+		case <-ticker.C:
+		case <-sigChan:
+			return
+		}
+	}
+}
+
+// refreshPortForwarding gets a new port forwarding signature when needed
+func refreshPortForwarding(pfClient *portforwarding.Client, pfInfo *portforwarding.PortForwardingInfo, initialPort *int, portChanged *bool) *portforwarding.PortForwardingInfo {
+	log.Printf("Port forwarding signature expiring soon, requesting a new one")
+	newPfInfo, err := pfClient.GetPortForwarding()
+	if err != nil {
+		log.Printf("Failed to get new port forwarding info: %v", err)
+		return pfInfo
+	}
+
+	*portChanged = newPfInfo.Port != *initialPort
+	*initialPort = newPfInfo.Port
+	log.Printf("Obtained new port forwarding: port=%d, expires=%s", newPfInfo.Port, newPfInfo.ExpiresAt)
+	return newPfInfo
+}
+
+// handlePortOutput writes the port to file and executes script if needed
+func handlePortOutput(port int, cfg *config.Config, portChanged bool) {
+	// Write the port to the output file
+	if err := portforwarding.WritePortToFile(port, cfg.OutputFile); err != nil {
+		log.Printf("Failed to write port to file: %v", err)
+		return
+	}
+
+	log.Printf("Wrote port %d to file: %s", port, cfg.OutputFile)
+
+	// Execute port change script if configured, but only if the port has changed
+	if cfg.OnPortChangeScript != "" && portChanged {
+		log.Printf("Port changed, executing script")
+		executePortChangeScript(cfg, port)
+	}
+}
+
 func main() {
 	// Create a default configuration
 	cfg := config.DefaultConfig()
@@ -112,44 +283,19 @@ func main() {
 	}
 
 	// Set up logging
-	if cfg.Debug {
-		log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
-	} else {
-		log.SetFlags(log.Ldate | log.Ltime)
-	}
+	setupLogging(cfg.Debug)
 
-	log.Printf("Starting PIA port forwarding service")
-	log.Printf("Credentials file: %s", cfg.CredentialsFile)
-	log.Printf("Output file: %s", cfg.OutputFile)
-	log.Printf("OpenVPN config file: %s", cfg.OpenVPNConfigFile)
-	log.Printf("Refresh interval: %s", cfg.RefreshInterval)
+	// Log configuration information
+	logConfigInfo(cfg)
 
-	if cfg.OnPortChangeScript != "" {
-		log.Printf("Port change script: %s", cfg.OnPortChangeScript)
-		log.Printf("Script execution mode: %s", getScriptMode(cfg))
-		log.Printf("Script timeout: %s", cfg.ScriptTimeout)
-	}
-
-	// Load credentials
-	username, password, err := cfg.LoadCredentials()
+	// Get authentication token
+	token, err := getAuthToken(cfg)
 	if err != nil {
-		log.Fatalf("Failed to load credentials: %v", err)
+		log.Fatalf("%v", err)
 	}
-
-	// Create authentication client
-	authClient := auth.NewClient(username, password)
-
-	// Get token
-	log.Printf("Obtaining PIA authentication token...")
-	token, err := authClient.GetToken()
-	if err != nil {
-		log.Fatalf("Failed to get token: %v", err)
-	}
-	log.Printf("Successfully obtained PIA token")
 
 	// Set up signal handling for graceful shutdown
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	sigChan := setupSignalHandler()
 
 	// Detect OpenVPN connection with retry logic
 	log.Printf("Detecting OpenVPN connection...")
@@ -181,109 +327,20 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	// Resolve CA certificate path
-	caCertPath := cfg.CACertFile
-	if !filepath.IsAbs(caCertPath) {
-		// If it's not an absolute path, look for it in the current directory
-		caCertPath = filepath.Join(".", caCertPath)
-		// Check if the file exists
-		if _, err := os.Stat(caCertPath); os.IsNotExist(err) {
-			// If not, try to find it in the same directory as the examples
-			examplesPath := filepath.Join("/etc/openvpn/client", caCertPath)
-			if _, err := os.Stat(examplesPath); err == nil {
-				caCertPath = examplesPath
-			} else {
-				log.Fatalf("CA certificate file not found: %s", cfg.CACertFile)
-			}
-		}
+	caCertPath, err := resolveCACertPath(cfg.CACertFile)
+	if err != nil {
+		log.Fatalf("%v", err)
 	}
 	log.Printf("Using CA certificate: %s", caCertPath)
 
 	// Create port forwarding client
 	pfClient := portforwarding.NewClient(token, connInfo.GatewayIP, connInfo.Hostname, caCertPath)
 
-	// Create a ticker for refreshing the port forwarding
-	ticker := time.NewTicker(cfg.RefreshInterval)
-	defer ticker.Stop()
-
 	// Create a channel to signal when the port forwarding is refreshed
 	refreshed := make(chan struct{})
 
 	// Start the port forwarding refresh loop in a goroutine
-	go func() {
-		// Get initial port forwarding info - this will be reused until it expires
-		var pfInfo *portforwarding.PortForwardingInfo
-		var err error
-
-		// Get the initial port forwarding info
-		pfInfo, err = pfClient.GetPortForwarding()
-		if err != nil {
-			log.Printf("Failed to get initial port forwarding info: %v", err)
-			return
-		}
-
-		log.Printf("Obtained port forwarding: port=%d, expires=%s", pfInfo.Port, pfInfo.ExpiresAt)
-
-		// Store the initial port for change detection
-		initialPort := pfInfo.Port
-		portChanged := true // Set to true for initial execution
-
-		for {
-			// Check if we need to get a new signature (if close to expiration)
-			if time.Until(pfInfo.ExpiresAt) < 24*time.Hour {
-				log.Printf("Port forwarding signature expiring soon, requesting a new one")
-				newPfInfo, err := pfClient.GetPortForwarding()
-				if err != nil {
-					log.Printf("Failed to get new port forwarding info: %v", err)
-				} else {
-					pfInfo = newPfInfo
-					portChanged = pfInfo.Port != initialPort
-					initialPort = pfInfo.Port
-					log.Printf("Obtained new port forwarding: port=%d, expires=%s", pfInfo.Port, pfInfo.ExpiresAt)
-				}
-			}
-
-			// Bind the port
-			if err := pfClient.BindPort(pfInfo.Payload, pfInfo.Signature); err != nil {
-				log.Printf("Failed to bind port: %v", err)
-				// Wait for the next tick
-				select {
-				case <-ticker.C:
-					continue
-				case <-sigChan:
-					return
-				}
-			}
-
-			log.Printf("Successfully bound port %d", pfInfo.Port)
-
-			// Write the port to the output file
-			if err := portforwarding.WritePortToFile(pfInfo.Port, cfg.OutputFile); err != nil {
-				log.Printf("Failed to write port to file: %v", err)
-			} else {
-				log.Printf("Wrote port %d to file: %s", pfInfo.Port, cfg.OutputFile)
-
-				// Execute port change script if configured, but only if the port has changed
-				if cfg.OnPortChangeScript != "" && portChanged {
-					log.Printf("Port changed, executing script")
-					executePortChangeScript(cfg, pfInfo.Port)
-					portChanged = false // Reset the flag after executing the script
-				}
-			}
-
-			// Signal that the port forwarding has been refreshed
-			select {
-			case refreshed <- struct{}{}:
-			default:
-			}
-
-			// Wait for the next tick
-			select {
-			case <-ticker.C:
-			case <-sigChan:
-				return
-			}
-		}
-	}()
+	go runPortForwardingLoop(pfClient, cfg, sigChan, refreshed)
 
 	// Wait for the first port forwarding refresh
 	select {

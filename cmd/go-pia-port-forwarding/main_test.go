@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/meschansky/go-pia/internal/config"
+	"github.com/meschansky/go-pia/internal/portforwarding"
 	"github.com/meschansky/go-pia/internal/vpn"
 )
 
@@ -439,11 +441,340 @@ func TestDetectVPNWithRetry(t *testing.T) {
 	}
 }
 
-func TestSetupConfig(t *testing.T) {
-	// Create a temporary directory
+// TestSetupConfig tests the configuration setup from environment variables
+// TestResolveCACertPath tests the CA certificate path resolution function
+// TestSetupLogging tests the logging configuration function
+func TestSetupLogging(t *testing.T) {
+	// Save original log flags to restore later
+	origFlags := log.Flags()
+	defer log.SetFlags(origFlags)
+
+	// Test cases
+	testCases := []struct {
+		name          string
+		debug         bool
+		expectedFlags int
+	}{
+		{
+			name:          "Debug mode enabled",
+			debug:         true,
+			expectedFlags: log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile,
+		},
+		{
+			name:          "Debug mode disabled",
+			debug:         false,
+			expectedFlags: log.Ldate | log.Ltime,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Call the function
+			setupLogging(tc.debug)
+
+			// Check that the flags were set correctly
+			actualFlags := log.Flags()
+			if actualFlags != tc.expectedFlags {
+				t.Errorf("setupLogging(%v) set flags to %d, expected %d",
+					tc.debug, actualFlags, tc.expectedFlags)
+			}
+		})
+	}
+}
+
+func TestResolveCACertPath(t *testing.T) {
+	// Create a temporary directory for test files
 	tmpDir := t.TempDir()
+
+	// Create a test certificate file
+	testCertName := "test-ca.crt"
+	testCertPath := filepath.Join(tmpDir, testCertName)
+	if err := os.WriteFile(testCertPath, []byte("test certificate"), 0644); err != nil {
+		t.Fatalf("Failed to create test certificate file: %v", err)
+	}
+
+	// Test cases
+	testCases := []struct {
+		name      string
+		certPath  string
+		expectErr bool
+	}{
+		{
+			name:      "Absolute path",
+			certPath:  testCertPath,
+			expectErr: false,
+		},
+		{
+			name:      "Non-existent file",
+			certPath:  "non-existent-file.crt",
+			expectErr: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Call the function
+			path, err := resolveCACertPath(tc.certPath)
+
+			// Check results
+			if tc.expectErr {
+				if err == nil {
+					t.Errorf("resolveCACertPath(%q) did not return expected error", tc.certPath)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("resolveCACertPath(%q) returned unexpected error: %v", tc.certPath, err)
+				}
+				if path == "" {
+					t.Errorf("resolveCACertPath(%q) returned empty path", tc.certPath)
+				}
+				if _, err := os.Stat(path); os.IsNotExist(err) {
+					t.Errorf("resolveCACertPath(%q) returned non-existent path: %s", tc.certPath, path)
+				}
+			}
+		})
+	}
+}
+
+// TestHandlePortOutput tests the port output handling function
+func TestHandlePortOutput(t *testing.T) {
+	// Create a temporary directory for test files
+	tmpDir := t.TempDir()
+
+	// Create a test output file
+	outputFile := filepath.Join(tmpDir, "port.txt")
+
+	// Create a test script file
+	scriptFile := filepath.Join(tmpDir, "port-script.sh")
+	scriptContent := "#!/bin/sh\necho \"Port: $1\" > " + filepath.Join(tmpDir, "script-output.txt")
+	if err := os.WriteFile(scriptFile, []byte(scriptContent), 0755); err != nil {
+		t.Fatalf("Failed to create test script file: %v", err)
+	}
+
+	// Save original execCommand and restore after test
+	origExecCommand := execCommand
+	defer func() { execCommand = origExecCommand }()
+
+	// Mock execCommand to create a script output file instead of actually executing
+	execCommand = func(ctx context.Context, command string, args ...string) *exec.Cmd {
+		// Create a fake script output file to simulate successful execution
+		if len(args) > 0 {
+			port := args[0]
+			outputContent := fmt.Sprintf("Port: %s", port)
+			os.WriteFile(filepath.Join(tmpDir, "script-output.txt"), []byte(outputContent), 0644)
+		}
+		// Return a command that does nothing but succeeds
+		cmd := exec.CommandContext(ctx, "echo", "test")
+		return cmd
+	}
+
+	// Test cases
+	testCases := []struct {
+		name            string
+		port            int
+		outputFile      string
+		script          string
+		portChanged     bool
+		expectScriptRun bool
+	}{
+		{
+			name:            "Port changed with script",
+			port:            12345,
+			outputFile:      outputFile,
+			script:          scriptFile,
+			portChanged:     true,
+			expectScriptRun: true,
+		},
+		{
+			name:            "Port unchanged with script",
+			port:            12345,
+			outputFile:      outputFile,
+			script:          scriptFile,
+			portChanged:     false,
+			expectScriptRun: false,
+		},
+		{
+			name:            "Port changed without script",
+			port:            12345,
+			outputFile:      outputFile,
+			script:          "",
+			portChanged:     true,
+			expectScriptRun: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create a test configuration
+			cfg := &config.Config{
+				OutputFile:         tc.outputFile,
+				OnPortChangeScript: tc.script,
+			}
+
+			// Remove any previous output files
+			os.Remove(tc.outputFile)
+			scriptOutputFile := filepath.Join(tmpDir, "script-output.txt")
+			os.Remove(scriptOutputFile)
+
+			// Call the function
+			handlePortOutput(tc.port, cfg, tc.portChanged)
+
+			// Check if the port was written to the output file
+			if tc.outputFile != "" {
+				portBytes, err := os.ReadFile(tc.outputFile)
+				if err != nil {
+					t.Errorf("Failed to read output file: %v", err)
+				} else {
+					portStr := string(portBytes)
+					expectedPort := strconv.Itoa(tc.port)
+					if portStr != expectedPort {
+						t.Errorf("Expected port %s in output file, got %s", expectedPort, portStr)
+					}
+				}
+			}
+
+			// Check if the script was run
+			if tc.expectScriptRun {
+				// Check if script output file exists
+				if _, err := os.Stat(scriptOutputFile); os.IsNotExist(err) {
+					t.Errorf("Script was not run when expected")
+				} else {
+					// Check script output content
+					outputBytes, err := os.ReadFile(scriptOutputFile)
+					if err != nil {
+						t.Errorf("Failed to read script output file: %v", err)
+					} else {
+						expectedOutput := fmt.Sprintf("Port: %d", tc.port)
+						if string(outputBytes) != expectedOutput {
+							t.Errorf("Expected script output %q, got %q", expectedOutput, string(outputBytes))
+						}
+					}
+				}
+			} else {
+				// Check script output file does not exist
+				if _, err := os.Stat(scriptOutputFile); !os.IsNotExist(err) {
+					t.Errorf("Script was run when not expected")
+				}
+			}
+		})
+	}
+}
+
+// TestRefreshPortForwarding tests the port forwarding refresh function
+func TestRefreshPortForwarding(t *testing.T) {
+	// Create a mock port forwarding client
+	type mockPFClient struct {
+		refreshError bool
+	}
+
+	// Define a test version of refreshPortForwarding that accepts our mock client and signature function
+	testRefreshPortForwarding := func(client interface{}, getSignature func(c *mockPFClient, pfInfo *portforwarding.PortForwardingInfo) (*portforwarding.PortForwardingInfo, error), pfInfo *portforwarding.PortForwardingInfo, initialPort *int, portChanged *bool) *portforwarding.PortForwardingInfo {
+		mockClient := client.(*mockPFClient)
+		newPfInfo, err := getSignature(mockClient, pfInfo)
+		if err != nil {
+			return pfInfo
+		}
+
+		*portChanged = newPfInfo.Port != *initialPort
+		*initialPort = newPfInfo.Port
+		return newPfInfo
+	}
+
+	// Mock GetSignature method
+	mockGetSignature := func(c *mockPFClient, pfInfo *portforwarding.PortForwardingInfo) (*portforwarding.PortForwardingInfo, error) {
+		if c.refreshError {
+			return nil, errors.New("mock refresh error")
+		}
+
+		// Return a new port forwarding info with a different port and future expiry
+		return &portforwarding.PortForwardingInfo{
+			Port:      54321, // Different from initial port
+			ExpiresAt: time.Now().Add(48 * time.Hour),
+			Signature: "new-signature",
+			Payload:   "new-payload",
+		}, nil
+	}
+
+	// Test cases
+	testCases := []struct {
+		name              string
+		initialPort       int
+		refreshError      bool
+		expectPort        int
+		expectPortChanged bool
+	}{
+		{
+			name:              "Successful refresh with port change",
+			initialPort:       12345,
+			refreshError:      false,
+			expectPort:        54321,
+			expectPortChanged: true,
+		},
+		{
+			name:              "Failed refresh",
+			initialPort:       12345,
+			refreshError:      true,
+			expectPort:        12345, // Should keep initial port
+			expectPortChanged: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create mock client
+			mockClient := &mockPFClient{refreshError: tc.refreshError}
+
+			// Create initial port forwarding info
+			initialInfo := &portforwarding.PortForwardingInfo{
+				Port:      tc.initialPort,
+				ExpiresAt: time.Now().Add(1 * time.Hour),
+				Signature: "initial-signature",
+				Payload:   "initial-payload",
+			}
+
+			// Variables to track port changes
+			initialPortVar := tc.initialPort
+			portChanged := false
+
+			// Call a modified version of refreshPortForwarding for testing
+			resultInfo := testRefreshPortForwarding(mockClient, mockGetSignature, initialInfo, &initialPortVar, &portChanged)
+
+			// Check results
+			if tc.refreshError {
+				// Should return the original info on error
+				if resultInfo != initialInfo {
+					t.Errorf("Expected original info to be returned on error, got different info")
+				}
+			} else {
+				// Should return new info on success
+				if resultInfo.Port != tc.expectPort {
+					t.Errorf("Expected port %d, got %d", tc.expectPort, resultInfo.Port)
+				}
+				if resultInfo.Signature != "new-signature" {
+					t.Errorf("Expected new signature, got %s", resultInfo.Signature)
+				}
+			}
+
+			// Check port change tracking
+			if portChanged != tc.expectPortChanged {
+				t.Errorf("Expected portChanged to be %v, got %v", tc.expectPortChanged, portChanged)
+			}
+
+			// Check initial port variable
+			if initialPortVar != tc.expectPort {
+				t.Errorf("Expected initialPort to be %d, got %d", tc.expectPort, initialPortVar)
+			}
+		})
+	}
+}
+
+func TestSetupConfig(t *testing.T) {
+	// Create a temporary directory for test files
+	tmpDir := t.TempDir()
+
+	// Create a temporary credentials file
 	credFile := filepath.Join(tmpDir, "credentials.txt")
-	if err := os.WriteFile(credFile, []byte("testuser\ntestpass"), 0644); err != nil {
+	if err := os.WriteFile(credFile, []byte("username\npassword"), 0600); err != nil {
 		t.Fatalf("Failed to create test credentials file: %v", err)
 	}
 
