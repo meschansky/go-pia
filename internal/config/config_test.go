@@ -199,6 +199,10 @@ func TestSplitLines(t *testing.T) {
 			input:    "line_with_trailing_newline\n",
 			expected: []string{"line_with_trailing_newline", ""},
 		},
+		{
+			input:    "line1\r\nline2\r\n",
+			expected: []string{"line1", "line2", ""},
+		},
 	}
 
 	for i, tc := range testCases {

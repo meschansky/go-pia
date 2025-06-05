@@ -168,17 +168,21 @@ func splitLines(s string) []string {
 	var line string
 
 	for _, r := range s {
-		if r == '\n' {
+		switch r {
+		case '\r':
+			// ignore carriage returns to support Windows line endings
+			continue
+		case '\n':
 			lines = append(lines, line)
 			line = ""
-		} else {
+		default:
 			line += string(r)
 		}
 	}
 
 	// Add the last line if there's any content or if the string ended with a newline
 	// and we've already added all previous content
-	if line != "" || (len(s) > 0 && s[len(s)-1] == '\n') {
+	if line != "" || (len(s) > 0 && (s[len(s)-1] == '\n' || s[len(s)-1] == '\r')) {
 		lines = append(lines, line)
 	}
 
