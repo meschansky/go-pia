@@ -124,7 +124,41 @@ func logConfigInfo(cfg *config.Config) {
 	}
 }
 
-// getAuthToken obtains a PIA authentication token
+// getAuthTokenWithRetry obtains a PIA authentication token with retry logic
+func getAuthTokenWithRetry(ctx context.Context, cfg *config.Config) (string, error) {
+	// Load credentials
+	username, password, err := cfg.LoadCredentials()
+	if err != nil {
+		return "", fmt.Errorf("failed to load credentials: %w", err)
+	}
+
+	// Create authentication client
+	authClient := auth.NewClient(username, password)
+
+	var lastErr error
+	for {
+		// Try to get token
+		log.Printf("Obtaining PIA authentication token...")
+		token, err := authClient.GetToken()
+		if err == nil {
+			log.Printf("Successfully obtained PIA token")
+			return token, nil
+		}
+
+		lastErr = err
+		log.Printf("Failed to get authentication token: %v. Retrying in %s...", err, cfg.VPNRetryInterval)
+
+		// Wait for the retry interval or until context is canceled
+		select {
+		case <-time.After(cfg.VPNRetryInterval):
+			// Continue with the next attempt
+		case <-ctx.Done():
+			return "", fmt.Errorf("authentication canceled: %w", lastErr)
+		}
+	}
+}
+
+// getAuthToken obtains a PIA authentication token (legacy function for compatibility)
 func getAuthToken(cfg *config.Config) (string, error) {
 	// Load credentials
 	username, password, err := cfg.LoadCredentials()
@@ -288,21 +322,21 @@ func main() {
 	// Log configuration information
 	logConfigInfo(cfg)
 
-	// Get authentication token
-	token, err := getAuthToken(cfg)
-	if err != nil {
-		log.Fatalf("%v", err)
-	}
-
 	// Set up signal handling for graceful shutdown
 	sigChan := setupSignalHandler()
-
-	// Detect OpenVPN connection with retry logic
-	log.Printf("Detecting OpenVPN connection...")
 
 	// Create a context that can be canceled on SIGINT/SIGTERM
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	defer cancelCtx()
+
+	// Get authentication token with retry logic
+	token, err := getAuthTokenWithRetry(ctx, cfg)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+
+	// Detect OpenVPN connection with retry logic
+	log.Printf("Detecting OpenVPN connection...")
 
 	// Setup a goroutine to handle signals and cancel the context
 	go func() {
