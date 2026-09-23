@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -164,27 +165,10 @@ func (c *Config) LoadCredentials() (username, password string, err error) {
 
 // Helper function to split a string into lines
 func splitLines(s string) []string {
-	var lines []string
-	var line string
-
-	for _, r := range s {
-		switch r {
-		case '\r':
-			// ignore carriage returns to support Windows line endings
-			continue
-		case '\n':
-			lines = append(lines, line)
-			line = ""
-		default:
-			line += string(r)
-		}
+	if s == "" {
+		return nil
 	}
 
-	// Add the last line if there's any content or if the string ended with a newline
-	// and we've already added all previous content
-	if line != "" || (len(s) > 0 && (s[len(s)-1] == '\n' || s[len(s)-1] == '\r')) {
-		lines = append(lines, line)
-	}
-
-	return lines
+	// Ignore carriage returns to support Windows line endings, then split on newlines.
+	return strings.Split(strings.ReplaceAll(s, "\r", ""), "\n")
 }

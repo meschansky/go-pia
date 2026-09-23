@@ -18,7 +18,7 @@ A robust Go implementation of a port-forwarding service for Private Internet Acc
 
 ## 📋 Prerequisites
 
-- Go 1.24+
+- Go 1.27.1+
 - OpenVPN (already configured and running)
 - PIA VPN subscription with port forwarding capability
 - PIA's CA certificate (`ca.rsa.4096.crt`) - included in this repository

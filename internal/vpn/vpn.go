@@ -1,7 +1,6 @@
 package vpn
 
 import (
-	"bufio"
 	"fmt"
 	"net"
 	"os"
@@ -68,9 +67,7 @@ func getVPNGatewayIP() (string, error) {
 
 	// Parse the output to find the gateway IP
 	// Look for lines containing "tun" and extract the gateway IP
-	scanner := bufio.NewScanner(strings.NewReader(string(output)))
-	for scanner.Scan() {
-		line := scanner.Text()
+	for line := range strings.SplitSeq(string(output), "\n") {
 		if strings.Contains(line, "tun") {
 			fields := strings.Fields(line)
 			if len(fields) >= 3 {
@@ -85,16 +82,13 @@ func getVPNGatewayIP() (string, error) {
 // getVPNHostname gets the VPN server hostname from the OpenVPN config
 func getVPNHostname(configPath string) (string, error) {
 	// Read the OpenVPN config file
-	file, err := os.Open(configPath)
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to open OpenVPN config: %w", err)
 	}
-	defer file.Close()
 
 	// Parse the config to find the remote server entry
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
+	for line := range strings.SplitSeq(string(data), "\n") {
 		if strings.HasPrefix(line, "remote ") {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
@@ -108,10 +102,6 @@ func getVPNHostname(configPath string) (string, error) {
 				}
 			}
 		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("error reading OpenVPN config: %w", err)
 	}
 
 	return "", fmt.Errorf("VPN server hostname not found in OpenVPN config")
