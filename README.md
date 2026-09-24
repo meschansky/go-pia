@@ -53,8 +53,10 @@ Download the latest release from the [Releases page](https://github.com/meschans
 
 2. **Place the CA Certificate**:
    - The `ca.rsa.4096.crt` file must be accessible to the application
-   - By default, it should be in the same directory as the executable
-   - You can also specify a custom path using the `PIA_CA_CERT` environment variable
+   - By default it is searched for in the current working directory, the
+     executable's directory, `/etc/openvpn/client` and `/etc/pia`
+   - You can also specify an explicit path using the `PIA_CA_CERT` environment
+     variable or the `--ca-cert` flag
 
 3. **Start OpenVPN**:
    ```bash
@@ -83,7 +85,7 @@ Where:
 | `PIA_ON_PORT_CHANGE` | Script to execute when port changes | (None) |
 | `PIA_SCRIPT_TIMEOUT` | Timeout for script execution | `30s` |
 | `PIA_SYNC_SCRIPT` | Run script synchronously | `false` |
-| `PIA_CA_CERT` | Path to PIA CA certificate | `./ca.rsa.4096.crt` |
+| `PIA_CA_CERT` | Path to PIA CA certificate | `./ca.rsa.4096.crt` (also searched in the executable dir, `/etc/openvpn/client` and `/etc/pia`) |
 | `PIA_VPN_RETRY_INTERVAL` | Interval between VPN connection retry attempts | `60s` |
 
 ### Command Line Options
@@ -127,7 +129,8 @@ By default, scripts run asynchronously (in the background). For more details and
 1. **Copy the binary**:
    ```bash
    sudo cp ./bin/go-pia-port-forwarding /usr/local/bin/
-   sudo cp ./ca.rsa.4096.crt /usr/local/bin/
+   sudo mkdir -p /usr/local/etc/pia
+   sudo cp ./ca.rsa.4096.crt /usr/local/etc/pia/
    ```
 
 2. **Copy and edit the systemd service file**:
@@ -135,6 +138,15 @@ By default, scripts run asynchronously (in the background). For more details and
    sudo cp go-pia-port-forwarding.service /etc/systemd/system/
    sudo nano /etc/systemd/system/go-pia-port-forwarding.service
    ```
+
+   The provided unit runs as `nobody` and reads credentials with
+   `LoadCredential=pia.txt:/etc/openvpn/client/pia.txt` (systemd >= 247), so the
+   credentials file can remain owned/readable only by root. The output file is
+   written to `/run/pia/port.txt`, which the unit creates via
+   `RuntimeDirectory=pia`. If you use an older systemd or run the binary
+   directly, make the credentials file readable by the service user (for
+   example `chown root:nogroup` + `chmod 0640`) and point `PIA_CREDENTIALS` at
+   it.
 
 3. **Enable and start the service**:
    ```bash
@@ -160,10 +172,11 @@ Check the [examples](./examples) directory for sample scripts:
 2. It obtains a PIA authentication token using your credentials
 3. It requests a port forwarding binding from the PIA API
 4. It maintains the port forwarding binding with periodic refreshes
-5. If the connection is lost, it attempts to re-establish port forwarding
-6. It writes the port number to the specified output file
-7. If configured, it executes a script with the port number as an argument
-8. It refreshes the port binding every 15 minutes to keep it active
+5. Authentication tokens are refreshed automatically when they approach expiry (24h)
+6. If the tunnel reconnects or rebinding fails, the gateway and hostname are re-detected and the client is rebuilt
+7. It writes the port number atomically to the specified output file
+8. If configured, it executes a script with the port number as an argument
+9. It refreshes the port binding every 15 minutes to keep it active
 
 ## 🛡️ Resilience Features
 

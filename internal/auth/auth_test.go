@@ -169,6 +169,36 @@ func TestRefreshToken(t *testing.T) {
 	}
 }
 
+// TestTokenRefreshMargin verifies the token is refreshed before it actually
+// expires so a long-running service does not use an almost-expired token.
+func TestTokenRefreshMargin(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(TokenResponse{Token: "fresh-token"})
+	}))
+	defer server.Close()
+
+	client := newTestClient(server, "testuser", "testpass")
+
+	// A token that is still valid but within the refresh margin must be
+	// refreshed instead of reused.
+	client.token = "stale-token"
+	client.expiresAt = time.Now().Add(time.Minute)
+
+	token, err := client.GetToken()
+	if err != nil {
+		t.Fatalf("GetToken: %v", err)
+	}
+	if token != "fresh-token" {
+		t.Errorf("token = %q, want fresh-token", token)
+	}
+	if callCount != 1 {
+		t.Errorf("server calls = %d, want 1", callCount)
+	}
+}
+
 func TestTokenExpiration(t *testing.T) {
 	// Track server calls
 	callCount := 0

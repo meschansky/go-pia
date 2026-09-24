@@ -303,12 +303,16 @@ type mockVPNDetector struct {
 	delay       time.Duration
 }
 
-func (m *mockVPNDetector) detect(configPath string) (*vpn.ConnectionInfo, error) {
+func (m *mockVPNDetector) detect(ctx context.Context, configPath string) (*vpn.ConnectionInfo, error) {
 	m.callCount++
 
-	// Simulate delay if configured
+	// Simulate delay, honoring cancellation.
 	if m.delay > 0 {
-		time.Sleep(m.delay)
+		select {
+		case <-time.After(m.delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 
 	// Return success after specified number of failures
@@ -379,30 +383,8 @@ func TestDetectVPNWithRetry(t *testing.T) {
 			}
 			defer cancel()
 
-			// Create a custom detectVPNWithRetry function that uses our mock
-			detectVPN := func(ctx context.Context, cfg *config.Config) (*vpn.ConnectionInfo, error) {
-				var lastErr error
-				for {
-					// Try to detect the VPN connection using our mock
-					connInfo, err := mockDetector.detect(cfg.OpenVPNConfigFile)
-					if err == nil {
-						return connInfo, nil
-					}
-
-					lastErr = err
-
-					// Wait for the retry interval or until context is canceled
-					select {
-					case <-time.After(cfg.VPNRetryInterval):
-						// Continue with the next attempt
-					case <-ctx.Done():
-						return nil, fmt.Errorf("VPN detection canceled: %w", lastErr)
-					}
-				}
-			}
-
-			// Call the function
-			connInfo, err := detectVPN(ctx, cfg)
+			// Call the real production function with the injected detector.
+			connInfo, err := detectVPNWithRetry(ctx, cfg.VPNRetryInterval, cfg.OpenVPNConfigFile, mockDetector.detect)
 
 			// Check results
 			if tc.expectSuccess {
@@ -441,9 +423,6 @@ func TestDetectVPNWithRetry(t *testing.T) {
 	}
 }
 
-// TestSetupConfig tests the configuration setup from environment variables
-// TestResolveCACertPath tests the CA certificate path resolution function
-// TestSetupLogging tests the logging configuration function
 func TestSetupLogging(t *testing.T) {
 	// Save original log flags to restore later
 	origFlags := log.Flags()
@@ -660,55 +639,54 @@ func TestHandlePortOutput(t *testing.T) {
 	}
 }
 
-// TestRefreshPortForwarding tests the port forwarding refresh function
+// fakePFClient implements portForwardingClient for tests. It records calls and
+// delegates to optional function fields.
+type fakePFClient struct {
+	getFunc   func() (*portforwarding.PortForwardingInfo, error)
+	bindFunc  func(payload, signature string) error
+	getCalls  int
+	bindCalls int
+}
+
+func (f *fakePFClient) GetPortForwarding() (*portforwarding.PortForwardingInfo, error) {
+	f.getCalls++
+	if f.getFunc != nil {
+		return f.getFunc()
+	}
+	return nil, errors.New("GetPortForwarding not implemented")
+}
+
+func (f *fakePFClient) BindPort(payload, signature string) error {
+	f.bindCalls++
+	if f.bindFunc != nil {
+		return f.bindFunc(payload, signature)
+	}
+	return nil
+}
+
+// TestRefreshPortForwarding tests the real refresh function with a fake client.
 func TestRefreshPortForwarding(t *testing.T) {
-	// Create a mock port forwarding client
-	type mockPFClient struct {
-		refreshError bool
-	}
-
-	// Define a test version of refreshPortForwarding that accepts our mock client and signature function
-	testRefreshPortForwarding := func(client interface{}, getSignature func(c *mockPFClient, pfInfo *portforwarding.PortForwardingInfo) (*portforwarding.PortForwardingInfo, error), pfInfo *portforwarding.PortForwardingInfo, initialPort *int, portChanged *bool) *portforwarding.PortForwardingInfo {
-		mockClient := client.(*mockPFClient)
-		newPfInfo, err := getSignature(mockClient, pfInfo)
-		if err != nil {
-			return pfInfo
-		}
-
-		*portChanged = newPfInfo.Port != *initialPort
-		*initialPort = newPfInfo.Port
-		return newPfInfo
-	}
-
-	// Mock GetSignature method
-	mockGetSignature := func(c *mockPFClient, pfInfo *portforwarding.PortForwardingInfo) (*portforwarding.PortForwardingInfo, error) {
-		if c.refreshError {
-			return nil, errors.New("mock refresh error")
-		}
-
-		// Return a new port forwarding info with a different port and future expiry
-		return &portforwarding.PortForwardingInfo{
-			Port:      54321, // Different from initial port
-			ExpiresAt: time.Now().Add(48 * time.Hour),
-			Signature: "new-signature",
-			Payload:   "new-payload",
-		}, nil
-	}
-
-	// Test cases
 	testCases := []struct {
 		name              string
 		initialPort       int
 		refreshError      bool
+		newPort           int
 		expectPort        int
 		expectPortChanged bool
 	}{
 		{
 			name:              "Successful refresh with port change",
 			initialPort:       12345,
-			refreshError:      false,
+			newPort:           54321,
 			expectPort:        54321,
 			expectPortChanged: true,
+		},
+		{
+			name:              "Successful refresh without port change",
+			initialPort:       12345,
+			newPort:           12345,
+			expectPort:        12345,
+			expectPortChanged: false,
 		},
 		{
 			name:              "Failed refresh",
@@ -721,10 +699,22 @@ func TestRefreshPortForwarding(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Create mock client
-			mockClient := &mockPFClient{refreshError: tc.refreshError}
+			client := &fakePFClient{}
+			if tc.refreshError {
+				client.getFunc = func() (*portforwarding.PortForwardingInfo, error) {
+					return nil, errors.New("mock refresh error")
+				}
+			} else {
+				client.getFunc = func() (*portforwarding.PortForwardingInfo, error) {
+					return &portforwarding.PortForwardingInfo{
+						Port:      tc.newPort,
+						ExpiresAt: time.Now().Add(48 * time.Hour),
+						Signature: "new-signature",
+						Payload:   "new-payload",
+					}, nil
+				}
+			}
 
-			// Create initial port forwarding info
 			initialInfo := &portforwarding.PortForwardingInfo{
 				Port:      tc.initialPort,
 				ExpiresAt: time.Now().Add(1 * time.Hour),
@@ -732,37 +722,18 @@ func TestRefreshPortForwarding(t *testing.T) {
 				Payload:   "initial-payload",
 			}
 
-			// Variables to track port changes
-			initialPortVar := tc.initialPort
-			portChanged := false
+			resultInfo, portChanged := refreshPortForwarding(client, initialInfo, tc.initialPort)
 
-			// Call a modified version of refreshPortForwarding for testing
-			resultInfo := testRefreshPortForwarding(mockClient, mockGetSignature, initialInfo, &initialPortVar, &portChanged)
-
-			// Check results
 			if tc.refreshError {
-				// Should return the original info on error
 				if resultInfo != initialInfo {
-					t.Errorf("Expected original info to be returned on error, got different info")
+					t.Error("Expected original info to be returned on error")
 				}
-			} else {
-				// Should return new info on success
-				if resultInfo.Port != tc.expectPort {
-					t.Errorf("Expected port %d, got %d", tc.expectPort, resultInfo.Port)
-				}
-				if resultInfo.Signature != "new-signature" {
-					t.Errorf("Expected new signature, got %s", resultInfo.Signature)
-				}
+			} else if resultInfo.Port != tc.expectPort {
+				t.Errorf("Expected port %d, got %d", tc.expectPort, resultInfo.Port)
 			}
 
-			// Check port change tracking
 			if portChanged != tc.expectPortChanged {
 				t.Errorf("Expected portChanged to be %v, got %v", tc.expectPortChanged, portChanged)
-			}
-
-			// Check initial port variable
-			if initialPortVar != tc.expectPort {
-				t.Errorf("Expected initialPort to be %d, got %d", tc.expectPort, initialPortVar)
 			}
 		})
 	}
@@ -915,5 +886,519 @@ func TestSetupConfig(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// writeTestScript creates an executable shell script in dir and returns its
+// path. The script body is prepended with a shebang.
+func writeTestScript(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0755); err != nil {
+		t.Fatalf("failed to write test script: %v", err)
+	}
+	return path
+}
+
+// TestExecutePortChangeScriptAsyncNotCanceled is a regression test: the
+// spawning function must not cancel the context while an async script is still
+// running, otherwise exec.CommandContext kills it immediately.
+func TestExecutePortChangeScriptAsyncNotCanceled(t *testing.T) {
+	tmpDir := t.TempDir()
+	marker := filepath.Join(tmpDir, "marker")
+	script := writeTestScript(t, tmpDir, "slow.sh", fmt.Sprintf("sleep 0.4\nprintf '%%s' \"$1\" > %q\n", marker))
+
+	cfg := &config.Config{
+		OnPortChangeScript: script,
+		OutputFile:         filepath.Join(tmpDir, "port.txt"),
+		SyncScript:         false,
+		ScriptTimeout:      5 * time.Second,
+	}
+
+	executePortChangeScript(cfg, 12345)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if b, err := os.ReadFile(marker); err == nil && string(b) == "12345" {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("async script was canceled before completing")
+}
+
+// TestExecutePortChangeScriptSyncTimeout verifies synchronous scripts honor the
+// configured timeout instead of blocking forever.
+func TestExecutePortChangeScriptSyncTimeout(t *testing.T) {
+	tmpDir := t.TempDir()
+	script := writeTestScript(t, tmpDir, "hang.sh", "sleep 10\n")
+
+	cfg := &config.Config{
+		OnPortChangeScript: script,
+		OutputFile:         filepath.Join(tmpDir, "port.txt"),
+		SyncScript:         true,
+		ScriptTimeout:      200 * time.Millisecond,
+	}
+
+	start := time.Now()
+	executePortChangeScript(cfg, 1)
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("sync script did not respect timeout, took %s", elapsed)
+	}
+}
+
+func TestRetryGetToken(t *testing.T) {
+	calls := 0
+	getToken := func() (string, error) {
+		calls++
+		if calls < 3 {
+			return "", errors.New("temporary auth failure")
+		}
+		return "token-ok", nil
+	}
+
+	token, err := retryGetToken(context.Background(), 5*time.Millisecond, getToken)
+	if err != nil {
+		t.Fatalf("retryGetToken: %v", err)
+	}
+	if token != "token-ok" {
+		t.Errorf("token = %q, want token-ok", token)
+	}
+	if calls != 3 {
+		t.Errorf("calls = %d, want 3", calls)
+	}
+
+	// Cancellation must abort the retry loop.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := retryGetToken(ctx, 5*time.Millisecond, func() (string, error) {
+		return "", errors.New("nope")
+	}); err == nil {
+		t.Error("expected error after context cancellation")
+	}
+}
+
+// TestRunPortForwardingLoopSuccess covers the happy path: the loop obtains a
+// port, binds it, writes the output file and runs the port-change script.
+func TestRunPortForwardingLoopSuccess(t *testing.T) {
+	tmpDir := t.TempDir()
+	outputFile := filepath.Join(tmpDir, "port.txt")
+	marker := filepath.Join(tmpDir, "script-ran")
+	// Sync script so the marker is written before the test inspects it.
+	script := writeTestScript(t, tmpDir, "onchange.sh", fmt.Sprintf("printf '%%s' \"$1\" > %q\n", marker))
+
+	cfg := &config.Config{
+		OutputFile:         outputFile,
+		OnPortChangeScript: script,
+		SyncScript:         true,
+		ScriptTimeout:      5 * time.Second,
+		RefreshInterval:    20 * time.Millisecond,
+		VPNRetryInterval:   5 * time.Millisecond,
+	}
+
+	client := &fakePFClient{
+		getFunc: func() (*portforwarding.PortForwardingInfo, error) {
+			return &portforwarding.PortForwardingInfo{
+				Port:      12345,
+				ExpiresAt: time.Now().Add(48 * time.Hour),
+				Payload:   "payload",
+				Signature: "signature",
+			}, nil
+		},
+	}
+	connect := func(ctx context.Context) (portForwardingClient, error) { return client, nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	refreshed := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runPortForwardingLoop(ctx, cfg, connect, refreshed)
+	}()
+
+	select {
+	case <-refreshed:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("timed out waiting for initial refresh")
+	}
+
+	if b, err := os.ReadFile(outputFile); err != nil || string(b) != "12345" {
+		t.Errorf("output file = %q, err=%v; want 12345", string(b), err)
+	}
+	if b, err := os.ReadFile(marker); err != nil || string(b) != "12345" {
+		t.Errorf("script marker = %q, err=%v; want 12345", string(b), err)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("loop did not stop after context cancellation")
+	}
+	if client.bindCalls < 1 {
+		t.Errorf("bindCalls = %d, want >= 1", client.bindCalls)
+	}
+}
+
+// TestRunPortForwardingLoopRetriesInitialFailure verifies the loop retries a
+// failing initial connection and request instead of giving up.
+func TestRunPortForwardingLoopRetriesInitialFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	cfg := &config.Config{
+		OutputFile:       filepath.Join(tmpDir, "port.txt"),
+		RefreshInterval:  20 * time.Millisecond,
+		VPNRetryInterval: 5 * time.Millisecond,
+	}
+
+	client := &fakePFClient{}
+	getCalls := 0
+	client.getFunc = func() (*portforwarding.PortForwardingInfo, error) {
+		getCalls++
+		if getCalls < 3 {
+			return nil, errors.New("temporary API failure")
+		}
+		return &portforwarding.PortForwardingInfo{
+			Port:      40000,
+			ExpiresAt: time.Now().Add(48 * time.Hour),
+			Payload:   "p",
+			Signature: "s",
+		}, nil
+	}
+
+	connectCalls := 0
+	connect := func(ctx context.Context) (portForwardingClient, error) {
+		connectCalls++
+		if connectCalls < 2 {
+			return nil, errors.New("VPN not ready")
+		}
+		return client, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	refreshed := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runPortForwardingLoop(ctx, cfg, connect, refreshed)
+	}()
+
+	select {
+	case <-refreshed:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("timed out waiting for initial refresh after retries")
+	}
+
+	if connectCalls < 2 {
+		t.Errorf("connectCalls = %d, want >= 2", connectCalls)
+	}
+	if getCalls < 3 {
+		t.Errorf("getCalls = %d, want >= 3", getCalls)
+	}
+
+	cancel()
+	<-done
+}
+
+// TestRunPortForwardingLoopReconnectsAfterBindFailure verifies that a bind
+// failure triggers re-detection/reconnection and a fresh signature, and that a
+// new port is propagated to the output file and script.
+func TestRunPortForwardingLoopReconnectsAfterBindFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	outputFile := filepath.Join(tmpDir, "port.txt")
+
+	cfg := &config.Config{
+		OutputFile:       outputFile,
+		RefreshInterval:  10 * time.Millisecond,
+		VPNRetryInterval: 5 * time.Millisecond,
+	}
+
+	first := &fakePFClient{
+		getFunc: func() (*portforwarding.PortForwardingInfo, error) {
+			return &portforwarding.PortForwardingInfo{Port: 11111, ExpiresAt: time.Now().Add(48 * time.Hour), Payload: "p1", Signature: "s1"}, nil
+		},
+		bindFunc: func(payload, signature string) error {
+			return errors.New("tunnel down")
+		},
+	}
+	second := &fakePFClient{
+		getFunc: func() (*portforwarding.PortForwardingInfo, error) {
+			return &portforwarding.PortForwardingInfo{Port: 22222, ExpiresAt: time.Now().Add(48 * time.Hour), Payload: "p2", Signature: "s2"}, nil
+		},
+	}
+
+	connectCalls := 0
+	connect := func(ctx context.Context) (portForwardingClient, error) {
+		connectCalls++
+		if connectCalls == 1 {
+			return first, nil
+		}
+		return second, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	refreshed := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runPortForwardingLoop(ctx, cfg, connect, refreshed)
+	}()
+
+	<-refreshed
+
+	// Wait until the reconnect path has produced the new port in the file.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if b, err := os.ReadFile(outputFile); err == nil && string(b) == "22222" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if b, err := os.ReadFile(outputFile); err != nil || string(b) != "22222" {
+		t.Errorf("output file = %q, err=%v; want 22222 after reconnect", string(b), err)
+	}
+	if connectCalls < 2 {
+		t.Errorf("connectCalls = %d, want >= 2", connectCalls)
+	}
+
+	cancel()
+	<-done
+}
+
+func TestWaitForInitialization(t *testing.T) {
+	t.Run("ready", func(t *testing.T) {
+		refreshed := make(chan struct{}, 1)
+		refreshed <- struct{}{}
+		done := make(chan struct{})
+		if err := waitForInitialization(context.Background(), refreshed, done, func() {}, time.Second); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("ctx canceled stops and waits", func(t *testing.T) {
+		ctx, cancelCtx := context.WithCancel(context.Background())
+		cancelCtx()
+		done := make(chan struct{})
+		canceled := false
+		cancel := func() { canceled = true; close(done) }
+		if err := waitForInitialization(ctx, make(chan struct{}), done, cancel, time.Second); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !canceled {
+			t.Error("expected loop cancel to be called")
+		}
+	})
+
+	t.Run("timeout cancels and waits for done", func(t *testing.T) {
+		done := make(chan struct{})
+		waited := false
+		cancel := func() { close(done) }
+		err := waitForInitialization(context.Background(), make(chan struct{}), done, cancel, 20*time.Millisecond)
+		if err == nil {
+			t.Fatal("expected timeout error")
+		}
+		select {
+		case <-done:
+			waited = true
+		default:
+		}
+		if !waited {
+			t.Error("expected waitForInitialization to block until loop exited")
+		}
+	})
+}
+
+// TestRunPortForwardingLoopNoFalseReadiness verifies the loop does not signal
+// readiness while the initial bind keeps failing.
+func TestRunPortForwardingLoopNoFalseReadiness(t *testing.T) {
+	tmpDir := t.TempDir()
+	outputFile := filepath.Join(tmpDir, "port.txt")
+
+	cfg := &config.Config{
+		OutputFile:       outputFile,
+		RefreshInterval:  time.Hour,
+		VPNRetryInterval: 10 * time.Millisecond,
+	}
+
+	client := &fakePFClient{
+		getFunc: func() (*portforwarding.PortForwardingInfo, error) {
+			return &portforwarding.PortForwardingInfo{Port: 12345, ExpiresAt: time.Now().Add(48 * time.Hour), Payload: "p", Signature: "s"}, nil
+		},
+		bindFunc: func(payload, signature string) error { return errors.New("bind down") },
+	}
+	connect := func(ctx context.Context) (portForwardingClient, error) { return client, nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	refreshed := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() { defer close(done); runPortForwardingLoop(ctx, cfg, connect, refreshed) }()
+
+	select {
+	case <-refreshed:
+		cancel()
+		t.Fatal("readiness signaled while initial bind was failing")
+	case <-time.After(200 * time.Millisecond):
+	}
+	if _, err := os.Stat(outputFile); !os.IsNotExist(err) {
+		t.Errorf("output file should not exist before a successful bind, stat err=%v", err)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("loop did not stop")
+	}
+
+	if client.bindCalls < 2 {
+		t.Errorf("expected repeated bind attempts, got %d", client.bindCalls)
+	}
+}
+
+// TestRunPortForwardingLoopPromptReconnect verifies that a bind failure triggers
+// an immediate reconnect (not a full RefreshInterval wait) and that the new
+// gateway's port is bound and published.
+func TestRunPortForwardingLoopPromptReconnect(t *testing.T) {
+	tmpDir := t.TempDir()
+	outputFile := filepath.Join(tmpDir, "port.txt")
+
+	// Refresh interval is huge: only the reconnect path can make progress.
+	cfg := &config.Config{
+		OutputFile:       outputFile,
+		RefreshInterval:  time.Hour,
+		VPNRetryInterval: 10 * time.Millisecond,
+	}
+
+	first := &fakePFClient{
+		getFunc: func() (*portforwarding.PortForwardingInfo, error) {
+			return &portforwarding.PortForwardingInfo{Port: 11111, ExpiresAt: time.Now().Add(48 * time.Hour), Payload: "p1", Signature: "s1"}, nil
+		},
+		bindFunc: func(payload, signature string) error { return errors.New("old gateway") },
+	}
+	second := &fakePFClient{
+		getFunc: func() (*portforwarding.PortForwardingInfo, error) {
+			return &portforwarding.PortForwardingInfo{Port: 22222, ExpiresAt: time.Now().Add(48 * time.Hour), Payload: "p2", Signature: "s2"}, nil
+		},
+	}
+
+	connectCalls := 0
+	connect := func(ctx context.Context) (portForwardingClient, error) {
+		connectCalls++
+		if connectCalls == 1 {
+			return first, nil
+		}
+		return second, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	refreshed := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() { defer close(done); runPortForwardingLoop(ctx, cfg, connect, refreshed) }()
+
+	select {
+	case <-refreshed:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("timed out: reconnect did not publish promptly")
+	}
+
+	if b, err := os.ReadFile(outputFile); err != nil || string(b) != "22222" {
+		t.Errorf("output = %q, err=%v; want 22222", string(b), err)
+	}
+	cancel()
+	<-done
+}
+
+// TestRunPortForwardingLoopWaitsForSuccessfulPublish verifies that a failed
+// output write delays readiness and preserves portChanged so the change script
+// runs only once publishing succeeds.
+func TestRunPortForwardingLoopWaitsForSuccessfulPublish(t *testing.T) {
+	tmpDir := t.TempDir()
+	// `blocker` is a file, so MkdirAll(blocker) fails until we remove it.
+	blocker := filepath.Join(tmpDir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0644); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	outputFile := filepath.Join(blocker, "port.txt")
+	marker := filepath.Join(tmpDir, "script-ran")
+	script := writeTestScript(t, tmpDir, "onchange.sh", fmt.Sprintf("printf '%%s' \"$1\" > %q\n", marker))
+
+	cfg := &config.Config{
+		OutputFile:         outputFile,
+		OnPortChangeScript: script,
+		SyncScript:         true,
+		ScriptTimeout:      5 * time.Second,
+		RefreshInterval:    time.Hour,
+		VPNRetryInterval:   10 * time.Millisecond,
+	}
+
+	client := &fakePFClient{
+		getFunc: func() (*portforwarding.PortForwardingInfo, error) {
+			return &portforwarding.PortForwardingInfo{Port: 33333, ExpiresAt: time.Now().Add(48 * time.Hour), Payload: "p", Signature: "s"}, nil
+		},
+	}
+	connect := func(ctx context.Context) (portForwardingClient, error) { return client, nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	refreshed := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() { defer close(done); runPortForwardingLoop(ctx, cfg, connect, refreshed) }()
+
+	// Publishing cannot succeed yet, so readiness must not be signaled.
+	select {
+	case <-refreshed:
+		cancel()
+		t.Fatal("readiness signaled despite failed output write")
+	case <-time.After(150 * time.Millisecond):
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Errorf("script must not run before successful publish, stat err=%v", err)
+	}
+
+	// Remove the blocking file; the loop must recover and publish.
+	if err := os.Remove(blocker); err != nil {
+		t.Fatalf("remove blocker: %v", err)
+	}
+
+	select {
+	case <-refreshed:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("timed out waiting for publish after output path became writable")
+	}
+
+	if b, err := os.ReadFile(outputFile); err != nil || string(b) != "33333" {
+		t.Errorf("output = %q, err=%v; want 33333", string(b), err)
+	}
+	if b, err := os.ReadFile(marker); err != nil || string(b) != "33333" {
+		t.Errorf("script marker = %q, err=%v; want 33333 (portChanged not preserved)", string(b), err)
+	}
+	cancel()
+	<-done
+}
+
+func TestBackoffBounded(t *testing.T) {
+	b := newBackoff(60 * time.Second)
+	if got := b.next(); got != time.Second {
+		t.Errorf("first backoff = %s, want 1s", got)
+	}
+	if got := b.next(); got != 2*time.Second {
+		t.Errorf("second backoff = %s, want 2s", got)
+	}
+	// Saturates at the cap and never decreases.
+	for i := 0; i < 20; i++ {
+		if got := b.next(); got > 60*time.Second {
+			t.Fatalf("backoff exceeded cap: %s", got)
+		}
+	}
+
+	// A cap smaller than one second is used as the base to keep tests fast.
+	tiny := newBackoff(5 * time.Millisecond)
+	if got := tiny.next(); got != 5*time.Millisecond {
+		t.Errorf("tiny backoff = %s, want 5ms", got)
 	}
 }

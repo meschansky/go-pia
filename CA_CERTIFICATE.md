@@ -36,7 +36,15 @@ The `ca.rsa.4096.crt` file is provided by PIA and is publicly available in their
 
 ## Certificate Location
 
-By default, the application expects the certificate file to be in the same directory as the executable. You can specify a custom path using the `PIA_CA_CERT` environment variable:
+The application resolves the CA certificate in the following order:
+
+1. The path given by `PIA_CA_CERT` (or `--ca-cert`), if set.
+2. `ca.rsa.4096.crt` in the current working directory.
+3. `ca.rsa.4096.crt` next to the executable.
+4. `/etc/openvpn/client/ca.rsa.4096.crt`.
+5. `/etc/pia/ca.rsa.4096.crt`.
+
+You can specify a custom path using the `PIA_CA_CERT` environment variable:
 
 ```bash
 PIA_CA_CERT="/path/to/ca.rsa.4096.crt" ./bin/go-pia-port-forwarding /var/run/pia-port.txt
@@ -45,8 +53,15 @@ PIA_CA_CERT="/path/to/ca.rsa.4096.crt" ./bin/go-pia-port-forwarding /var/run/pia
 When running as a systemd service, the certificate path should be specified in the service file:
 
 ```ini
-Environment="PIA_CA_CERT=/usr/local/bin/ca.rsa.4096.crt"
+Environment="PIA_CA_CERT=/usr/local/etc/pia/ca.rsa.4096.crt"
 ```
+
+The certificate is loaded into the TLS root pool and is always used to verify
+the port forwarding server. The server certificate is verified against the PIA
+server name (the `cn` value from PIA's public server list, e.g. `newyork433`),
+not the gateway IP that the TCP connection is made to. This mirrors curl's
+`--connect-to "$PF_HOSTNAME::$PF_GATEWAY:"`, where `$PF_HOSTNAME` is the server
+name from the server list.
 
 ## Certificate Validity
 

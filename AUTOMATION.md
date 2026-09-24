@@ -26,7 +26,7 @@ PIA_ON_PORT_CHANGE=/path/to/your/script.sh go-pia-port-forwarding /path/to/port/
 
 ### Systemd Service Configuration
 
-To use this feature with the systemd service, add the environment variable to your service file:
+To use this feature with the systemd service, add `PIA_ON_PORT_CHANGE` to your service file (the snippet below also shows credential loading via `LoadCredential` so the service can run as `nobody`):
 
 ```ini
 [Unit]
@@ -35,11 +35,13 @@ After=network.target openvpn-client@pia.service
 
 [Service]
 Type=simple
-Environment="PIA_CREDENTIALS=/etc/openvpn/server/pia.txt"
+LoadCredential=pia.txt:/etc/openvpn/client/pia.txt
+Environment="PIA_CA_CERT=/usr/local/etc/pia/ca.rsa.4096.crt"
 Environment="PIA_ON_PORT_CHANGE=/path/to/your/script.sh"
-ExecStart=/usr/local/bin/go-pia-port-forwarding /var/run/pia-port.txt
+ExecStart=/usr/bin/env PIA_CREDENTIALS=%d/pia.txt /usr/local/bin/go-pia-port-forwarding /run/pia/port.txt
 Restart=on-failure
 RestartSec=30
+RuntimeDirectory=pia
 
 [Install]
 WantedBy=multi-user.target

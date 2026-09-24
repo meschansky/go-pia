@@ -11,6 +11,7 @@ import (
 
 // Config holds the application configuration
 type Config struct {
+	parseErr error
 	// Path to the file containing PIA credentials (username and password)
 	CredentialsFile string
 	// Path to the file where the forwarded port will be written
@@ -35,34 +36,20 @@ type Config struct {
 
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
-	// Parse refresh interval from environment if set
-	refreshInterval := 15 * time.Minute
-	if refreshStr := os.Getenv("PIA_REFRESH_INTERVAL"); refreshStr != "" {
-		if refreshSec, err := time.ParseDuration(refreshStr); err == nil {
-			refreshInterval = refreshSec
-		}
-	}
+	refreshInterval, refreshErr := envDuration("PIA_REFRESH_INTERVAL", 15*time.Minute)
+	scriptTimeout, scriptErr := envDuration("PIA_SCRIPT_TIMEOUT", 30*time.Second)
+	vpnRetryInterval, retryErr := envDuration("PIA_VPN_RETRY_INTERVAL", time.Minute)
 
-	// Parse script timeout from environment if set
-	scriptTimeout := 30 * time.Second
-	if timeoutStr := os.Getenv("PIA_SCRIPT_TIMEOUT"); timeoutStr != "" {
-		if timeout, err := time.ParseDuration(timeoutStr); err == nil {
-			scriptTimeout = timeout
-		}
-	}
-
-	// Parse VPN retry interval from environment if set
-	vpnRetryInterval := 60 * time.Second
-	if retryStr := os.Getenv("PIA_VPN_RETRY_INTERVAL"); retryStr != "" {
-		if retry, err := time.ParseDuration(retryStr); err == nil {
-			vpnRetryInterval = retry
-		}
+	caCertFile := "ca.rsa.4096.crt"
+	if caCert := os.Getenv("PIA_CA_CERT"); caCert != "" {
+		caCertFile = caCert
 	}
 
 	return &Config{
+		parseErr:           firstError(refreshErr, scriptErr, retryErr),
 		CredentialsFile:    os.Getenv("PIA_CREDENTIALS"),
 		OpenVPNConfigFile:  "/etc/openvpn/client/pia.ovpn",
-		CACertFile:         "ca.rsa.4096.crt", // Will look for this in the current directory
+		CACertFile:         caCertFile,
 		RefreshInterval:    refreshInterval,
 		Debug:              os.Getenv("PIA_DEBUG") == "true",
 		OnPortChangeScript: os.Getenv("PIA_ON_PORT_CHANGE"),
@@ -72,8 +59,30 @@ func DefaultConfig() *Config {
 	}
 }
 
-// SetupFlags registers command line flags for all configuration options
-func SetupFlags(cfg *Config) {
+func envDuration(name string, fallback time.Duration) (time.Duration, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback, nil
+	}
+	d, err := parsePositiveDuration(name, value)
+	if err != nil {
+		return fallback, err
+	}
+	return d, nil
+}
+
+func firstError(errs ...error) error {
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetupFlags registers command line flags for all configuration options. It
+// returns an error if a duration flag cannot be parsed or is not positive.
+func SetupFlags(cfg *Config) error {
 	// Define command line flags for all configuration options
 	flag.StringVar(&cfg.CredentialsFile, "credentials", cfg.CredentialsFile, "Path to the file containing PIA credentials (username and password)")
 
@@ -104,32 +113,69 @@ func SetupFlags(cfg *Config) {
 
 	// Parse duration flags if provided
 	if *refreshIntervalStr != "" {
-		if d, err := time.ParseDuration(*refreshIntervalStr); err == nil {
-			cfg.RefreshInterval = d
+		d, err := parsePositiveDuration("refresh-interval", *refreshIntervalStr)
+		if err != nil {
+			return err
 		}
+		cfg.RefreshInterval = d
 	}
 
 	if *scriptTimeoutStr != "" {
-		if d, err := time.ParseDuration(*scriptTimeoutStr); err == nil {
-			cfg.ScriptTimeout = d
+		d, err := parsePositiveDuration("script-timeout", *scriptTimeoutStr)
+		if err != nil {
+			return err
 		}
+		cfg.ScriptTimeout = d
 	}
 
 	if *vpnRetryIntervalStr != "" {
-		if d, err := time.ParseDuration(*vpnRetryIntervalStr); err == nil {
-			cfg.VPNRetryInterval = d
+		d, err := parsePositiveDuration("vpn-retry-interval", *vpnRetryIntervalStr)
+		if err != nil {
+			return err
 		}
+		cfg.VPNRetryInterval = d
 	}
+
+	return nil
+}
+
+// parsePositiveDuration parses a duration flag value and rejects zero or
+// negative durations, which would otherwise produce a busy loop or a ticker
+// panic at runtime.
+func parsePositiveDuration(name, value string) (time.Duration, error) {
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q: %w", name, value, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("invalid %s %q: must be greater than zero", name, value)
+	}
+	return d, nil
 }
 
 // Validate checks if the configuration is valid
 func (c *Config) Validate() error {
+	if c.parseErr != nil {
+		return c.parseErr
+	}
 	if c.CredentialsFile == "" {
 		return fmt.Errorf("credentials file path is required (set PIA_CREDENTIALS environment variable)")
 	}
 
 	if c.OutputFile == "" {
 		return fmt.Errorf("output file path is required (provide as first argument)")
+	}
+
+	if c.RefreshInterval <= 0 {
+		return fmt.Errorf("refresh interval must be greater than zero, got %s", c.RefreshInterval)
+	}
+
+	if c.ScriptTimeout <= 0 {
+		return fmt.Errorf("script timeout must be greater than zero, got %s", c.ScriptTimeout)
+	}
+
+	if c.VPNRetryInterval <= 0 {
+		return fmt.Errorf("VPN retry interval must be greater than zero, got %s", c.VPNRetryInterval)
 	}
 
 	// Check if credentials file exists
@@ -160,7 +206,16 @@ func (c *Config) LoadCredentials() (username, password string, err error) {
 		return "", "", fmt.Errorf("invalid credentials file format: expected at least 2 lines")
 	}
 
-	return lines[0], lines[1], nil
+	username = strings.TrimSpace(lines[0])
+	password = lines[1]
+	if username == "" {
+		return "", "", fmt.Errorf("invalid credentials file: username is empty")
+	}
+	if password == "" {
+		return "", "", fmt.Errorf("invalid credentials file: password is empty")
+	}
+
+	return username, password, nil
 }
 
 // Helper function to split a string into lines

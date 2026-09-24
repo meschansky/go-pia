@@ -6,7 +6,7 @@ This document outlines the design for a Go-based implementation of the PIA VPN p
 
 ## System Requirements
 
-- Go (1.24+)
+- Go (1.27.1+)
 - OpenVPN (already configured and running)
 - PIA VPN subscription with port forwarding capability
 
@@ -103,10 +103,12 @@ After=network.target openvpn-client@pia.service
 
 [Service]
 Type=simple
-Environment="PIA_CREDENTIALS=/etc/openvpn/server/pia.txt"
-ExecStart=/usr/local/bin/go-pia-port-forwarding /var/run/pia-port.txt
+LoadCredential=pia.txt:/etc/openvpn/client/pia.txt
+Environment="PIA_CA_CERT=/usr/local/etc/pia/ca.rsa.4096.crt"
+ExecStart=/usr/bin/env PIA_CREDENTIALS=%d/pia.txt /usr/local/bin/go-pia-port-forwarding /run/pia/port.txt
 Restart=on-failure
 RestartSec=30
+RuntimeDirectory=pia
 
 [Install]
 WantedBy=multi-user.target
@@ -197,41 +199,20 @@ For the PF_HOSTNAME, the reference implementation uses the hostname of the VPN s
 2. This hostname is then reused as PF_HOSTNAME for port forwarding
 
 In our Go implementation, we will:
-1. Extract the hostname from the OpenVPN configuration file (typically at `/etc/openvpn/client/pia.ovpn`)
-2. If the hostname cannot be determined from the config file, we'll fall back to using the server IP with a standard PIA hostname suffix
+1. Extract the server address from the OpenVPN configuration file (typically at `/etc/openvpn/client/pia.ovpn`)
+2. If the address is already a hostname, use it directly
+3. If it is an IP address, map it to the server name (`cn`) using PIA's public server list (`https://serverlist.piaservers.net/vpninfo/servers/v6`), because PIA server certificates contain that server name (for example `newyork433`), not the IP and not the region DNS name
+4. If the server list lookup fails, return an actionable error instead of inventing a name that cannot match the certificate. The service retries detection (and systemd restarts it if startup keeps failing) rather than proceeding with a name that is guaranteed to fail TLS verification.
 
-Example code to get the hostname:
-```go
-// Get the VPN server hostname from the OpenVPN config
-func getVPNHostname(configPath string) (string, error) {
-    // Read the OpenVPN config file
-    content, err := ioutil.ReadFile(configPath)
-    if err != nil {
-        return "", fmt.Errorf("failed to read OpenVPN config: %w", err)
-    }
-    
-    // Parse the config to find the remote server entry
-    scanner := bufio.NewScanner(strings.NewReader(string(content)))
-    for scanner.Scan() {
-        line := scanner.Text()
-        if strings.HasPrefix(line, "remote ") {
-            fields := strings.Fields(line)
-            if len(fields) >= 2 {
-                // Check if the second field is an IP or hostname
-                if net.ParseIP(fields[1]) != nil {
-                    // It's an IP, so we need to determine the hostname
-                    // For PIA, we can use a standard suffix
-                    return fields[1] + ".privacy.network", nil
-                } else {
-                    // It's already a hostname
-                    return fields[1], nil
-                }
-            }
-        }
-    }
-    
-    return "", fmt.Errorf("VPN server hostname not found in OpenVPN config")
-}
-```
+The resolved name is used both as the HTTP Host header and as the TLS
+`ServerName` when connecting to the gateway IP, matching curl's
+`--connect-to "$PF_HOSTNAME::$PF_GATEWAY:" --cacert "ca.rsa.4096.crt"`.
+
+The implementation lives in `internal/vpn/vpn.go`:
+
+- `parseVPNRemote` extracts the server address from the `remote` directive.
+- `lookupServerHostname` maps an IP to the server `cn` using PIA's server list.
+- `getVPNHostname` combines the two and returns an actionable error if an IP
+  remote cannot be resolved.
 
 By implementing these methods, our Go service will be able to automatically determine the PF_GATEWAY and PF_HOSTNAME values needed for port forwarding, without requiring manual input from the user.

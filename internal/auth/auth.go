@@ -15,6 +15,9 @@ const (
 	TokenURL = "https://www.privateinternetaccess.com/api/client/v2/token"
 	// TokenValidityDuration is how long a token is valid (24 hours)
 	TokenValidityDuration = 24 * time.Hour
+	// tokenRefreshMargin refreshes a token slightly before it actually expires
+	// so a long-running service never sends a token that expires mid-request.
+	tokenRefreshMargin = 5 * time.Minute
 )
 
 // TokenResponse represents the response from the PIA token API
@@ -45,8 +48,8 @@ func NewClient(username, password string) *Client {
 
 // GetToken returns a valid token, obtaining a new one if necessary
 func (c *Client) GetToken() (string, error) {
-	// If we have a valid token, return it
-	if c.token != "" && time.Now().Before(c.expiresAt) {
+	// If we have a token that is not close to expiry, return it
+	if c.token != "" && time.Now().Add(tokenRefreshMargin).Before(c.expiresAt) {
 		return c.token, nil
 	}
 

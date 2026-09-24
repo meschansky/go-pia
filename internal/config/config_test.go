@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -76,6 +77,30 @@ func TestDefaultConfig(t *testing.T) {
 	os.Setenv("PIA_SYNC_SCRIPT", origSyncScript)
 }
 
+func TestDefaultConfigRejectsInvalidEnvironmentDurations(t *testing.T) {
+	credFile := filepath.Join(t.TempDir(), "credentials.txt")
+	if err := os.WriteFile(credFile, []byte("user\npassword"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PIA_CREDENTIALS", credFile)
+	for _, name := range []string{"PIA_REFRESH_INTERVAL", "PIA_SCRIPT_TIMEOUT", "PIA_VPN_RETRY_INTERVAL"} {
+		t.Setenv(name, "")
+	}
+
+	for _, name := range []string{"PIA_REFRESH_INTERVAL", "PIA_SCRIPT_TIMEOUT", "PIA_VPN_RETRY_INTERVAL"} {
+		for _, value := range []string{"invalid", "0s", "-1s"} {
+			t.Run(name+"/"+value, func(t *testing.T) {
+				t.Setenv(name, value)
+				cfg := DefaultConfig()
+				cfg.OutputFile = filepath.Join(t.TempDir(), "port.txt")
+				if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), name) {
+					t.Fatalf("expected %s error for %q, got %v", name, value, err)
+				}
+			})
+		}
+	}
+}
+
 func TestValidate(t *testing.T) {
 	// Create a temporary credentials file
 	tmpDir := t.TempDir()
@@ -93,8 +118,11 @@ func TestValidate(t *testing.T) {
 		{
 			name: "Valid config",
 			config: &Config{
-				CredentialsFile: credFile,
-				OutputFile:      filepath.Join(tmpDir, "output.txt"),
+				CredentialsFile:  credFile,
+				OutputFile:       filepath.Join(tmpDir, "output.txt"),
+				RefreshInterval:  15 * time.Minute,
+				ScriptTimeout:    30 * time.Second,
+				VPNRetryInterval: 60 * time.Second,
 			},
 			expectError: false,
 		},
@@ -119,6 +147,50 @@ func TestValidate(t *testing.T) {
 			config: &Config{
 				CredentialsFile: filepath.Join(tmpDir, "nonexistent.txt"),
 				OutputFile:      filepath.Join(tmpDir, "output.txt"),
+			},
+			expectError: true,
+		},
+		{
+			name: "Zero refresh interval",
+			config: &Config{
+				CredentialsFile:  credFile,
+				OutputFile:       filepath.Join(tmpDir, "output.txt"),
+				RefreshInterval:  0,
+				ScriptTimeout:    30 * time.Second,
+				VPNRetryInterval: 60 * time.Second,
+			},
+			expectError: true,
+		},
+		{
+			name: "Negative refresh interval",
+			config: &Config{
+				CredentialsFile:  credFile,
+				OutputFile:       filepath.Join(tmpDir, "output.txt"),
+				RefreshInterval:  -time.Minute,
+				ScriptTimeout:    30 * time.Second,
+				VPNRetryInterval: 60 * time.Second,
+			},
+			expectError: true,
+		},
+		{
+			name: "Zero script timeout",
+			config: &Config{
+				CredentialsFile:  credFile,
+				OutputFile:       filepath.Join(tmpDir, "output.txt"),
+				RefreshInterval:  15 * time.Minute,
+				ScriptTimeout:    0,
+				VPNRetryInterval: 60 * time.Second,
+			},
+			expectError: true,
+		},
+		{
+			name: "Zero VPN retry interval",
+			config: &Config{
+				CredentialsFile:  credFile,
+				OutputFile:       filepath.Join(tmpDir, "output.txt"),
+				RefreshInterval:  15 * time.Minute,
+				ScriptTimeout:    30 * time.Second,
+				VPNRetryInterval: 0,
 			},
 			expectError: true,
 		},
@@ -176,6 +248,26 @@ func TestLoadCredentials(t *testing.T) {
 	if err == nil {
 		t.Errorf("Expected error for invalid credentials file but got nil")
 	}
+
+	// Empty password must be rejected.
+	emptyPassword := filepath.Join(tmpDir, "empty_password.txt")
+	if err := os.WriteFile(emptyPassword, []byte("testuser\n"), 0644); err != nil {
+		t.Fatalf("Failed to create test credentials file: %v", err)
+	}
+	cfg.CredentialsFile = emptyPassword
+	if _, _, err := cfg.LoadCredentials(); err == nil {
+		t.Error("Expected error for empty password but got nil")
+	}
+
+	// Empty username must be rejected.
+	emptyUsername := filepath.Join(tmpDir, "empty_username.txt")
+	if err := os.WriteFile(emptyUsername, []byte("\ntestpass"), 0644); err != nil {
+		t.Fatalf("Failed to create test credentials file: %v", err)
+	}
+	cfg.CredentialsFile = emptyUsername
+	if _, _, err := cfg.LoadCredentials(); err == nil {
+		t.Error("Expected error for empty username but got nil")
+	}
 }
 
 func TestSplitLines(t *testing.T) {
@@ -218,5 +310,37 @@ func TestSplitLines(t *testing.T) {
 				t.Errorf("Test case %d, line %d: Expected %q, got %q", i, j, tc.expected[j], line)
 			}
 		}
+	}
+}
+
+func TestCACertFromEnvironment(t *testing.T) {
+	orig := os.Getenv("PIA_CA_CERT")
+	defer os.Setenv("PIA_CA_CERT", orig)
+
+	os.Setenv("PIA_CA_CERT", "/custom/path/ca.crt")
+	cfg := DefaultConfig()
+	if cfg.CACertFile != "/custom/path/ca.crt" {
+		t.Errorf("Expected CACertFile from PIA_CA_CERT, got %q", cfg.CACertFile)
+	}
+
+	os.Setenv("PIA_CA_CERT", "")
+	cfg = DefaultConfig()
+	if cfg.CACertFile != "ca.rsa.4096.crt" {
+		t.Errorf("Expected default CACertFile, got %q", cfg.CACertFile)
+	}
+}
+
+func TestParsePositiveDuration(t *testing.T) {
+	if d, err := parsePositiveDuration("x", "15m"); err != nil || d != 15*time.Minute {
+		t.Errorf("parsePositiveDuration(15m) = %v, %v", d, err)
+	}
+	if _, err := parsePositiveDuration("x", "not-a-duration"); err == nil {
+		t.Error("expected error for invalid duration")
+	}
+	if _, err := parsePositiveDuration("x", "0s"); err == nil {
+		t.Error("expected error for zero duration")
+	}
+	if _, err := parsePositiveDuration("x", "-1m"); err == nil {
+		t.Error("expected error for negative duration")
 	}
 }

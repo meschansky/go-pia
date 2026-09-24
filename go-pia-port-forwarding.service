@@ -7,11 +7,14 @@ Wants=openvpn-client@pia.service
 [Service]
 Type=simple
 # Required configuration
-Environment="PIA_CREDENTIALS=/etc/openvpn/client/pia.txt"
-Environment="PIA_CA_CERT=/usr/local/etc/ca.rsa.4096.crt"
+# The credentials file is loaded into the service's private credential
+# directory (systemd >= 247) so it can stay owned/readable only by root even
+# though the service runs as `nobody`; %d expands to $CREDENTIALS_DIRECTORY.
+LoadCredential=pia.txt:/etc/openvpn/client/pia.txt
+Environment="PIA_CA_CERT=/usr/local/etc/pia/ca.rsa.4096.crt"
 
 # Optional configuration
-#Environment="PIA_VPN_RETRY_INTERVAL=60s" # How often to check for active VPN connection
+#Environment="PIA_VPN_RETRY_INTERVAL=60s" # How often to re-check the active VPN connection and re-detect its gateway
 #Environment="PIA_DEBUG=true"
 #Environment="PIA_REFRESH_INTERVAL=15m"
 
@@ -20,9 +23,14 @@ Environment="PIA_CA_CERT=/usr/local/etc/ca.rsa.4096.crt"
 #Environment="PIA_SCRIPT_TIMEOUT=30s"
 #Environment="PIA_SYNC_SCRIPT=true"
 
-ExecStart=/usr/local/bin/go-pia-port-forwarding /var/run/pia-port.txt
+ExecStart=/usr/bin/env PIA_CREDENTIALS=%d/pia.txt /usr/local/bin/go-pia-port-forwarding /run/pia/port.txt
 Restart=on-failure
 RestartSec=30
+
+# RuntimeDirectory creates /run/pia owned by the service user, so the output
+# file can be written even when running as an unprivileged user.
+RuntimeDirectory=pia
+RuntimeDirectoryMode=0755
 
 # Security hardening. It can break scripts that use PIA_ON_PORT_CHANGE as it will be run with
 # a different user that may not have the same permissions to access the output file
